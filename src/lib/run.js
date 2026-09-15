@@ -1,22 +1,29 @@
-import Url from 'utils/Url';
-import mimeType from 'mime-types';
-import markdownIt from 'markdown-it';
-import mustache from 'mustache';
-import $_console from 'views/console.hbs';
-import $_markdown from 'views/markdown.hbs';
-import helpers from 'utils/helpers';
-import constants from './constants';
-import fsOperation from 'fileSystem';
-import openFolder from './openFolder';
-import appSettings from './settings';
-import EditorFile from './editorFile';
-import tutorial from 'components/tutorial';
-import box from 'dialogs/box';
-import alert from 'dialogs/alert';
-import browser from 'plugins/browser';
+import fsOperation from "fileSystem";
+import { getDocText } from "cm/editorUtils";
+import tutorial from "components/tutorial";
+import alert from "dialogs/alert";
+import dialog from "dialogs/dialog";
+import markdownIt from "markdown-it";
+import anchor from "markdown-it-anchor";
+import MarkdownItGitHubAlerts from "markdown-it-github-alerts";
+import mimeType from "mime-types";
+import mustache from "mustache";
+import openMarkdownPreview from "pages/markdownPreview";
+import browser from "plugins/browser";
+import helpers from "utils/helpers";
+import Url from "utils/Url";
+import $_console from "views/console.hbs";
+import $_markdown from "views/markdown.hbs";
+import config from "./config";
+import EditorFile from "./editorFile";
+import openFolder from "./openFolder";
+import appSettings from "./settings";
 
 /**@type {Server} */
 let webServer;
+
+// An open console may outlive the server instance that created it.
+const CONSOLE_THEME_STATE = "__acode_console_theme.json";
 
 /**
  * Starts the server and run the active file in browser
@@ -25,314 +32,396 @@ let webServer;
  * @param {Boolean} runFile
  */
 async function run(
-  isConsole = false,
-  target = appSettings.value.previewMode,
-  runFile = false,
+	isConsole = false,
+	target = appSettings.value.previewMode,
+	runFile = false,
 ) {
-  if (!isConsole && !runFile) {
-    const {
-      serverPort,
-      previewPort,
-      previewMode,
-      disableCache,
-      host,
-    } = appSettings.value;
-    if (serverPort !== previewPort) {
-      const src = `http://${host}:${previewPort}`;
-      if (previewMode === 'browser') {
-        system.openInBrowser(src);
-        return;
-      }
+	/** @type {EditorFile} */
+	const activeFile = isConsole ? null : editorManager.activeFile;
 
-      system.inAppBrowser(src, '', false, disableCache);
-    }
-  }
+	if (!isConsole && Url.extname(activeFile?.filename || "") === ".md") {
+		if (!(await activeFile?.canRun())) return;
+		await openMarkdownPreview(activeFile);
+		return;
+	}
 
-  /** @type {EditorFile} */
-  const activeFile = isConsole ? null : editorManager.activeFile;
-  if (!isConsole && !await activeFile?.canRun()) return;
+	if (!isConsole && !runFile) {
+		const { serverPort, previewPort, previewMode, disableCache, host } =
+			appSettings.value;
+		if (serverPort !== previewPort) {
+			const src = `http://${host}:${previewPort}`;
+			if (previewMode === "browser") {
+				system.openInBrowser(src);
+				return;
+			}
 
-  if (!isConsole && !localStorage.__init_runPreview) {
-    localStorage.__init_runPreview = true;
-    tutorial('run-preview', strings['preview info']);
-  }
+			browser.open(src);
+			return;
+		}
+	}
 
-  const uuid = helpers.uuid();
+	if (!isConsole && !(await activeFile?.canRun())) return;
 
-  let isLoading = false;
-  let filename, pathName, extension;
-  let port = appSettings.value.serverPort;
-  let EXECUTING_SCRIPT = uuid + '_script.js';
-  const MIMETYPE_HTML = mimeType.lookup('html');
-  const CONSOLE_SCRIPT = uuid + '_console.js';
-  const MARKDOWN_STYLE = uuid + '_md.css';
-  const queue = [];
+	if (!isConsole && !localStorage.__init_runPreview) {
+		localStorage.__init_runPreview = true;
+		tutorial("run-preview", strings["preview info"]);
+	}
 
-  if (activeFile) {
-    filename = activeFile.filename;
-    pathName = activeFile.location;
-    extension = Url.extname(filename);
+	const uuid = helpers.uuid();
 
-    if (!pathName && activeFile.uri) {
-      pathName = Url.dirname(activeFile.uri);
-    }
-  }
+	let isLoading = false;
+	let filename, pathName, extension;
+	let port = appSettings.value.serverPort;
+	let shouldExecuteScript = false;
+	const MIMETYPE_HTML = mimeType.lookup("html");
+	const CONSOLE_SCRIPT = uuid + "_console.js";
+	const CONSOLE_WORKER_SCRIPT = uuid + "_console_worker.js";
+	// Keep this route independent of the filename because characters such as
+	// "#" and "?" change how browsers parse a URL.
+	const EXECUTING_SCRIPT = uuid + "_script.js";
+	const CONSOLE_THEME_STYLE = uuid + "_console_theme.css";
+	const MARKDOWN_STYLE = uuid + "_md.css";
+	const queue = [];
 
-  if (runFile && extension === 'svg') {
-    try {
-      const fs = fsOperation(activeFile.uri);
-      const res = await fs.readFile();
-      const blob = new Blob([new Uint8Array(res)], {
-        type: mimeType.lookup(extension),
-      });
+	if (activeFile) {
+		filename = activeFile.filename;
+		pathName = activeFile.location;
+		extension = Url.extname(filename);
 
-      box(filename, `<img src='${URL.createObjectURL(blob)}'>`);
-    } catch (err) {
-      helpers.error(err);
-    }
-    return;
-  }
+		if (!pathName && activeFile.uri) {
+			pathName = Url.dirname(activeFile.uri);
+		}
+	}
 
-  if (!runFile && filename !== 'index.html' && pathName) {
-    const folder = openFolder.find(activeFile.uri);
+	if (runFile && extension === "svg") {
+		try {
+			const fs = fsOperation(activeFile.uri);
+			const res = await fs.readFile();
+			const blob = new Blob([new Uint8Array(res)], {
+				type: mimeType.lookup(extension),
+			});
 
-    if (folder) {
-      const { url } = folder;
-      const fs = fsOperation(Url.join(url, 'index.html'));
+			dialog(filename, `<img src='${URL.createObjectURL(blob)}'>`);
+		} catch (err) {
+			helpers.error(err);
+		}
+		return;
+	}
 
-      try {
-        if (await fs.exists()) {
-          filename = 'index.html';
-          extension = 'html';
-          pathName = url;
-          start();
-          return;
-        }
+	if (!runFile && filename !== "index.html" && pathName) {
+		const folder = openFolder.find(activeFile.uri);
 
-        next();
-        return;
-      } catch (err) {
-        helpers.error(err);
-        return;
-      }
-    }
-  }
+		if (folder) {
+			const { url } = folder;
+			const fs = fsOperation(Url.join(url, "index.html"));
 
-  next();
+			try {
+				if (await fs.exists()) {
+					filename = "index.html";
+					extension = "html";
+					pathName = url;
+					start();
+					return;
+				}
 
-  function next() {
-    if (extension === '.js' || isConsole) startConsole();
-    else start();
-  }
+				next();
+				return;
+			} catch (err) {
+				helpers.error(err);
+				return;
+			}
+		}
+	}
 
-  function startConsole() {
-    runConsole();
-    start();
-  }
+	next();
 
-  function runConsole() {
-    if (!isConsole) EXECUTING_SCRIPT = activeFile.filename;
-    isConsole = true;
-    target = 'inapp';
-    filename = 'console.html';
-    pathName = `${ASSETS_DIRECTORY}www/`;
-    port = constants.CONSOLE_PORT;
-  }
+	function next() {
+		if (extension === ".js" || isConsole) startConsole();
+		else start();
+	}
 
-  function start() {
-    if (target === 'browser') {
-      system.isPowerSaveMode(
-        (res) => {
-          if (res) {
-            alert(strings.info, strings['powersave mode warning']);
-          } else {
-            startServer();
-          }
-        },
-        startServer,
-      );
-    } else {
-      startServer();
-    }
-  }
+	function startConsole() {
+		runConsole();
+		start();
+	}
 
-  function startServer() {
-    webServer?.stop();
-    webServer = CreateServer(
-      port,
-      openBrowser,
-      onError,
-    );
-    webServer.setOnRequestHandler(handleRequest);
+	function runConsole() {
+		if (!isConsole) shouldExecuteScript = true;
+		isConsole = true;
+		target = "inapp";
+		filename = "console.html";
+		pathName = `${ASSETS_DIRECTORY}www/`;
+		port = config.CONSOLE_PORT;
+	}
 
-    function onError(err) {
-      if (err === 'Server already running') {
-        openBrowser();
-      } else {
-        ++port;
-        start();
-      }
-    }
-  }
+	function start() {
+		if (target === "browser") {
+			system.isPowerSaveMode((res) => {
+				if (res) {
+					alert(strings.info, strings["powersave mode warning"]);
+				} else {
+					startServer();
+				}
+			}, startServer);
+		} else {
+			startServer();
+		}
+	}
 
-  /**
-   * Requests handler
-   * @param {object} req
-   * @param {string} req.requestId
-   * @param {string} req.path 
-   */
-  function handleRequest(req) {
-    const reqId = req.requestId;
-    let reqPath = req.path.substring(1);
+	function startServer() {
+		webServer?.stop();
+		webServer = CreateServer(port, openBrowser, onError);
+		webServer.setOnRequestHandler(handleRequest);
 
-    if (!reqPath || reqPath.endsWith('/')) {
-      reqPath += 'index.html';
-    }
+		function onError(err) {
+			if (err === "Server already running") {
+				openBrowser();
+			} else {
+				++port;
+				start();
+			}
+		}
+	}
 
-    const ext = Url.extname(reqPath);
-    let url = null;
+	/**
+	 * Requests handler
+	 * @param {object} req
+	 * @param {string} req.requestId
+	 * @param {string} req.path
+	 */
+	function handleRequest(req) {
+		const reqId = req.requestId;
+		let reqPath = req.path.substring(1);
 
-    switch (reqPath) {
-      case CONSOLE_SCRIPT:
-        if (isConsole || appSettings.value.console === appSettings.CONSOLE_LEGACY) {
-          url = `${ASSETS_DIRECTORY}/js/build/console.build.js`;
-        } else {
-          url = `${DATA_STORAGE}/eruda.js`;
-        }
-        sendFileContent(url, reqId, 'application/javascript');
-        break;
+		if (!reqPath || reqPath.endsWith("/")) {
+			reqPath += "index.html";
+		}
 
-      case EXECUTING_SCRIPT: {
-        const text = activeFile?.session.getValue() || '';
-        sendText(text, reqId, 'application/javascript');
-        break;
-      }
+		const ext = Url.extname(reqPath);
+		let url = null;
 
-      case MARKDOWN_STYLE:
-        url = appSettings.value.markdownStyle;
-        if (url) sendFileContent(url, reqId, 'text/css');
-        else sendText('img {max-width: 100%;}', reqId, 'text/css');
-        break;
+		switch (reqPath) {
+			case CONSOLE_SCRIPT:
+				if (
+					isConsole ||
+					appSettings.value.console === appSettings.CONSOLE_LEGACY
+				) {
+					url = `${ASSETS_DIRECTORY}/build/console.js`;
+				} else {
+					url = `${DATA_STORAGE}/eruda.js`;
+				}
+				sendFileContent(url, reqId, "application/javascript");
+				break;
 
-      default:
-        sendByExt();
-        break;
-    }
+			case CONSOLE_WORKER_SCRIPT:
+				url = `${ASSETS_DIRECTORY}/build/consoleWorker.js`;
+				sendFileContent(url, reqId, "application/javascript");
+				break;
 
-    async function sendByExt() {
-      if (isConsole) {
-        if (reqPath === 'console.html') {
-          sendText(
-            mustache.render($_console, {
-              CONSOLE_SCRIPT,
-              EXECUTING_SCRIPT,
-            }),
-            reqId,
-            MIMETYPE_HTML,
-          );
-          return;
-        }
+			case CONSOLE_THEME_STYLE:
+				sendText(getConsoleThemeSnapshot().css, reqId, "text/css");
+				break;
 
-        if (reqPath === 'favicon.ico') {
-          sendIco(ASSETS_DIRECTORY, reqId);
-          return;
-        }
-      }
+			case CONSOLE_THEME_STATE:
+				sendText(
+					JSON.stringify(getConsoleThemeSnapshot()),
+					reqId,
+					"application/json",
+				);
+				break;
 
-      if (activeFile.mode === 'single') {
-        if (filename === reqPath) {
-          sendText(
-            activeFile.session.getValue(),
-            reqId,
-            mimeType.lookup(filename),
-          );
-        } else {
-          error(reqId);
-        }
-        return;
-      }
+			case EXECUTING_SCRIPT: {
+				const text = getDocText(activeFile?.session?.doc);
+				sendText(text, reqId, "application/javascript");
+				break;
+			}
 
-      let url = activeFile.uri;
-      let file = activeFile.SAFMode === 'single' ? activeFile : null;
+			case MARKDOWN_STYLE:
+				url = appSettings.value.markdownStyle;
+				if (url) sendFileContent(url, reqId, "text/css");
+				else sendText("img {max-width: 100%;}", reqId, "text/css");
+				break;
 
-      if (pathName) {
-        url = Url.join(pathName, reqPath);
-        file = editorManager.getFile(url, 'uri');
-      } else if (!activeFile.uri) {
-        file = activeFile;
-      }
+			default:
+				sendByExt();
+				break;
+		}
 
-      switch (ext) {
-        case '.htm':
-        case '.html':
-          if (file && file.loaded && file.isUnsaved) {
-            sendHTML(file.session.getValue(), reqId);
-          } else {
-            sendFileContent(url, reqId, MIMETYPE_HTML);
-          }
-          break;
+		async function sendByExt() {
+			if (isConsole) {
+				if (reqPath === "console.html") {
+					sendText(
+						mustache.render($_console, {
+							CONSOLE_SCRIPT,
+							CONSOLE_WORKER_SCRIPT,
+							CONSOLE_THEME_STYLE,
+							CONSOLE_THEME_STATE,
+							EXECUTING_SCRIPT: shouldExecuteScript ? EXECUTING_SCRIPT : null,
+							APP_THEME_TYPE: getConsoleThemeSnapshot().type,
+						}),
+						reqId,
+						MIMETYPE_HTML,
+					);
+					return;
+				}
 
-        case '.md':
-          if (file) {
-            const html = markdownIt({ html: true }).render(file.session.getValue());
-            const doc = mustache.render($_markdown, {
-              html,
-              filename,
-              MARKDOWN_STYLE,
-            });
-            sendText(doc, reqId, MIMETYPE_HTML);
-          }
-          break;
+				if (reqPath === "favicon.ico") {
+					sendIco(ASSETS_DIRECTORY, reqId);
+					return;
+				}
+			}
 
-        default:
-          if (file && file.loaded && file.isUnsaved) {
-            sendText(
-              file.session.getValue(),
-              reqId,
-              mimeType.lookup(file.filename),
-            );
-          } else if (url) {
-            if (reqPath === 'favicon.ico') {
-              sendIco(ASSETS_DIRECTORY, reqId);
-            } else {
-              sendFile(url, reqId);
-            }
-          } else {
-            error(reqId);
-          }
-          break;
-      }
-    }
-  }
+			if (activeFile.SAFMode === "single") {
+				if (filename === reqPath) {
+					sendText(
+						getDocText(activeFile.session?.doc),
+						reqId,
+						mimeType.lookup(filename),
+					);
+				} else {
+					error(reqId);
+				}
+				return;
+			}
 
-  /**
-   * Sends 404 error
-   * @param {string} id 
-   */
-  function error(id) {
-    webServer?.send(id, {
-      status: 404,
-      body: 'File not found!',
-    });
-  }
+			let url = activeFile.uri;
+			let file = activeFile.SAFMode === "single" ? activeFile : null;
 
-  /**
-   * Sends favicon
-   * @param {string} assets 
-   * @param {string} reqId 
-   */
-  function sendIco(assets, reqId) {
-    const ico = Url.join(assets, 'res/logo/favicon.ico');
-    sendFile(ico, reqId);
-  }
+			if (pathName) {
+				url = Url.join(pathName, reqPath);
+				file = editorManager.getFile(url, "uri");
+			} else if (!activeFile.uri && filename === reqPath) {
+				file = activeFile;
+			}
 
-  /**
-   * Sends HTML file
-   * @param {string} text
-   * @param {string} id
-   */
-  function sendHTML(text, id) {
-    const js = `<!-- Injected code, this is not present in original code --><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+			if (!url && !file) {
+				error(reqId);
+				return;
+			}
+
+			// Handle extensionless URLs (e.g., "about" -> "about.html" or "about/index.html")
+			if (!ext && pathName) {
+				// Try exact match first for extensionless files (LICENSE, README, etc.)
+				const exactUrl = Url.join(pathName, reqPath);
+				const exactFs = fsOperation(exactUrl);
+				if (await exactFs.exists()) {
+					sendFile(exactUrl, reqId);
+					return;
+				}
+
+				// Try path.html
+				const htmlUrl = Url.join(pathName, reqPath + ".html");
+				const htmlFile = editorManager.getFile(htmlUrl, "uri");
+				if (htmlFile?.loaded && htmlFile.isUnsaved) {
+					sendHTML(getDocText(htmlFile.session?.doc), reqId);
+					return;
+				}
+				const htmlFs = fsOperation(htmlUrl);
+				if (await htmlFs.exists()) {
+					sendFileContent(htmlUrl, reqId, MIMETYPE_HTML);
+					return;
+				}
+
+				// Try path/index.html
+				const indexUrl = Url.join(pathName, reqPath, "index.html");
+				const indexFs = fsOperation(indexUrl);
+				if (await indexFs.exists()) {
+					sendFileContent(indexUrl, reqId, MIMETYPE_HTML);
+					return;
+				}
+
+				error(reqId);
+				return;
+			}
+
+			switch (ext) {
+				case ".htm":
+				case ".html":
+					if (!url || (file && file.loaded && file.isUnsaved)) {
+						sendHTML(getDocText(file.session?.doc), reqId);
+					} else {
+						sendFileContent(url, reqId, MIMETYPE_HTML);
+					}
+					break;
+
+				case ".md":
+					if (file) {
+						const html = markdownIt({ html: true })
+							.use(MarkdownItGitHubAlerts)
+							.use(anchor, {
+								slugify: (s) =>
+									s
+										.trim()
+										.toLowerCase()
+										.replace(/[^a-z0-9]+/g, "-"),
+							})
+							.render(getDocText(file.session?.doc));
+						const doc = mustache.render($_markdown, {
+							html,
+							filename,
+							MARKDOWN_STYLE,
+						});
+						sendText(doc, reqId, MIMETYPE_HTML);
+					}
+					break;
+
+				default:
+					if (!url || (file && file.loaded && file.isUnsaved)) {
+						sendText(
+							getDocText(file.session?.doc),
+							reqId,
+							mimeType.lookup(file.filename),
+						);
+					} else if (url) {
+						if (reqPath === "favicon.ico") {
+							sendIco(ASSETS_DIRECTORY, reqId);
+						} else {
+							sendFile(url, reqId);
+						}
+					} else {
+						error(reqId);
+					}
+					break;
+			}
+		}
+	}
+
+	function getConsoleThemeSnapshot() {
+		return {
+			css: document.head.querySelector("style#app-theme")?.textContent || "",
+			type: document.body.getAttribute("theme-type") || "dark",
+		};
+	}
+
+	/**
+	 * Sends 404 error
+	 * @param {string} id
+	 */
+	function error(id) {
+		webServer?.send(id, {
+			status: 404,
+			body: "File not found!",
+		});
+	}
+
+	/**
+	 * Sends favicon
+	 * @param {string} assets
+	 * @param {string} reqId
+	 */
+	function sendIco(assets, reqId) {
+		const ico = Url.join(assets, "res/logo/favicon.ico");
+		sendFile(ico, reqId);
+	}
+
+	/**
+	 * Sends HTML file
+	 * @param {string} text
+	 * @param {string} id
+	 */
+	function sendHTML(text, id) {
+		const js = `<!-- Injected code, this is not present in original code --><meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <script class="${uuid}">window.__consoleWorkerScript = "/${CONSOLE_WORKER_SCRIPT}";</script>
     <script class="${uuid}" src="/${CONSOLE_SCRIPT}" crossorigin="anonymous"></script>
     <script class="${uuid}">
       if(window.eruda){
@@ -340,151 +429,156 @@ async function run(
           theme: 'dark'
         });
 
-        ${target === 'inapp'
-        ? "eruda._shadowRoot.querySelector('.eruda-entry-btn').style.display = 'none';"
-        : ""}
-        
+        ${
+					target === "inapp"
+						? "eruda._shadowRoot.querySelector('.eruda-entry-btn').style.display = 'none';"
+						: ""
+				}
+
         sessionStorage.setItem('__console_available', true);
         document.addEventListener('showconsole', function () {eruda.show()});
         document.addEventListener('hideconsole', function () {eruda.hide()});
       }else if(document.querySelector('c-toggler')){
-        ${target === 'inapp' || (target !== 'inapp' && !appSettings.value.showConsoleToggler)
-        ? "document.querySelector('c-toggler').style.display = 'none';"
-        : ""}
+        ${
+					target === "inapp" ||
+					(target !== "inapp" && !appSettings.value.showConsoleToggler)
+						? "document.querySelector('c-toggler').style.display = 'none';"
+						: ""
+				}
       }
       setTimeout(function(){
         var scripts = document.querySelectorAll('.${uuid}');
         scripts.forEach(function(el){document.head.removeChild(el)});
       }, 0);
     </script><!-- Injected code, this is not present in original code -->`;
-    text = text.replace(/><\/script>/g, ' crossorigin="anonymous"></script>');
-    const part = text.split('<head>');
-    if (part.length === 2) {
-      text = `${part[0]}<head>${js}${part[1]}`;
-    } else if (/<html>/i.test(text)) {
-      text = text.replace('<html>', `<html><head>${js}</head>`);
-    } else {
-      text = `<head>${js}</head>` + text;
-    }
-    sendText(text, id);
-  }
+		text = text.replace(/><\/script>/g, ' crossorigin="anonymous"></script>');
+		const part = text.split("<head>");
+		if (part.length === 2) {
+			text = `${part[0]}<head>${js}${part[1]}`;
+		} else if (/<html>/i.test(text)) {
+			text = text.replace("<html>", `<html><head>${js}</head>`);
+		} else {
+			text = `<head>${js}</head>` + text;
+		}
+		sendText(text, id);
+	}
 
-  /**
-   * Sends file
-   * @param {string} path 
-   * @param {string} id 
-   * @returns 
-   */
-  async function sendFile(path, id) {
-    if (isLoading) {
-      queue.push(() => {
-        sendFile(path, id);
-      });
-      return;
-    }
+	/**
+	 * Sends file
+	 * @param {string} path
+	 * @param {string} id
+	 * @returns
+	 */
+	async function sendFile(path, id) {
+		if (isLoading) {
+			queue.push(() => {
+				sendFile(path, id);
+			});
+			return;
+		}
 
-    isLoading = true;
-    const protocol = Url.getProtocol(path);
-    const ext = Url.extname(path);
-    const mimetype = mimeType.lookup(ext);
-    if (/s?ftp:/.test(protocol)) {
-      const cacheFile = Url.join(
-        CACHE_STORAGE,
-        protocol.slice(0, -1) + path.hashCode(),
-      );
-      const fs = fsOperation(path);
-      try {
-        await fs.readFile(); // Because reading the remote file will create cache file
-        path = cacheFile;
-      } catch (err) {
-        error(id);
-        isLoading = false;
-        return;
-      }
-    } else if (protocol === 'content:') {
-      path = await new Promise((resolve, reject) => {
-        sdcard.formatUri(path, resolve, reject);
-      });
-    } else if (!/^file:/.test(protocol)) {
-      const fileContent = await fsOperation(path).readFile();
-      const tempFileName = path.hashCode();
-      const tempFile = Url.join(CACHE_STORAGE, tempFileName);
-      if (!await fsOperation(tempFile).exists()) {
-        await fsOperation(CACHE_STORAGE).createFile(tempFileName, fileContent);
-      } else {
-        await fsOperation(tempFile).writeFile(fileContent);
-      }
-      path = tempFile;
-    }
+		isLoading = true;
+		const protocol = Url.getProtocol(path);
+		const ext = Url.extname(path);
+		const mimetype = mimeType.lookup(ext);
+		if (/s?ftp:/.test(protocol)) {
+			const cacheFile = Url.join(
+				CACHE_STORAGE,
+				protocol.slice(0, -1) + path.hashCode(),
+			);
+			const fs = fsOperation(path);
+			try {
+				await fs.readFile(); // Because reading the remote file will create cache file
+				path = cacheFile;
+			} catch (err) {
+				error(id);
+				isLoading = false;
+				return;
+			}
+		} else if (protocol === "content:") {
+			path = await new Promise((resolve, reject) => {
+				sdcard.formatUri(path, resolve, reject);
+			});
+		} else if (!/^file:/.test(protocol)) {
+			const fileContent = await fsOperation(path).readFile();
+			const tempFileName = path.hashCode();
+			const tempFile = Url.join(CACHE_STORAGE, tempFileName);
+			if (!(await fsOperation(tempFile).exists())) {
+				await fsOperation(CACHE_STORAGE).createFile(tempFileName, fileContent);
+			} else {
+				await fsOperation(tempFile).writeFile(fileContent);
+			}
+			path = tempFile;
+		}
 
-    webServer?.send(id, {
-      status: 200,
-      path,
-      headers: {
-        'Content-Type': mimetype,
-      },
-    });
+		webServer?.send(id, {
+			status: 200,
+			path,
+			headers: {
+				"Content-Type": mimetype,
+			},
+		});
 
-    isLoading = false;
-    const action = queue.splice(-1, 1)[0];
-    if (typeof action === 'function') action();
-  }
+		isLoading = false;
+		const action = queue.splice(-1, 1)[0];
+		if (typeof action === "function") action();
+	}
 
-  /**
-   * Sends file content
-   * @param {string} url 
-   * @param {string} id 
-   * @param {string} mime 
-   * @param {(txt: string) => string} processText 
-   * @returns 
-   */
-  async function sendFileContent(url, id, mime, processText) {
-    const fs = fsOperation(url);
+	/**
+	 * Sends file content
+	 * @param {string} url
+	 * @param {string} id
+	 * @param {string} mime
+	 * @param {(txt: string) => string} processText
+	 * @returns
+	 */
+	async function sendFileContent(url, id, mime, processText) {
+		const fs = fsOperation(url);
 
-    if (!(await fs.exists())) {
-      error(id);
-      return;
-    }
+		if (!(await fs.exists())) {
+			error(id);
+			return;
+		}
 
-    let text = await fs.readFile(appSettings.value.defaultFileEncoding);
-    text = processText ? processText(text) : text;
-    if (mime === MIMETYPE_HTML) {
-      sendHTML(text, id);
-    } else {
-      sendText(text, id, mime);
-    }
-  }
+		let text = await fs.readFile(appSettings.value.defaultFileEncoding);
+		text = processText ? processText(text) : text;
+		if (mime === MIMETYPE_HTML) {
+			sendHTML(text, id);
+		} else {
+			sendText(text, id, mime);
+		}
+	}
 
-  /**
-   * Sends text
-   * @param {string} text 
-   * @param {string} id 
-   * @param {string} mimeType 
-   * @param {(txt: string) => string} processText 
-   */
-  function sendText(text, id, mimeType, processText) {
-    webServer?.send(id, {
-      status: 200,
-      body: processText ? processText(text) : text,
-      headers: {
-        'Content-Type': mimeType || 'text/html',
-      },
-    });
-  }
+	/**
+	 * Sends text
+	 * @param {string} text
+	 * @param {string} id
+	 * @param {string} mimeType
+	 * @param {(txt: string) => string} processText
+	 */
+	function sendText(text, id, mimeType, processText) {
+		webServer?.send(id, {
+			status: 200,
+			body: processText ? processText(text) : text,
+			headers: {
+				"Content-Type": mimeType || "text/html",
+			},
+		});
+	}
 
-  /**
-   * Opens the preview in browser
-   */
-  function openBrowser() {
-    console.count('openBrowser');
-    const src = `http://localhost:${port}/${filename}`;
-    if (target === 'browser') {
-      system.openInBrowser(src);
-      return;
-    }
+	/**
+	 * Opens the preview in browser
+	 */
+	function openBrowser() {
+		console.count("openBrowser");
+		const src = `http://localhost:${port}/${filename}`;
+		if (target === "browser") {
+			system.openInBrowser(src);
+			return;
+		}
 
-    browser.open(src, isConsole);
-  }
+		browser.open(src, isConsole);
+	}
 }
 
 export default run;

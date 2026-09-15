@@ -1,17 +1,23 @@
-import Url from 'utils/Url';
-import color from 'utils/color';
-import fsOperation from 'fileSystem';
-import fonts from '../lib/fonts';
-import themes from './preInstalled';
-import settings from '../lib/settings';
-import ThemeBuilder from './builder';
+import fonts from "lib/fonts";
+import settings from "lib/settings";
+import { isDeviceDarkTheme } from "lib/systemConfiguration";
+import { updateActiveTerminals } from "settings/terminalSettings";
+import color from "utils/color";
+import ThemeBuilder from "./builder";
+import themes, { updateSystemTheme } from "./preInstalled";
 
 /** @type {Map<string, ThemeBuilder>} */
 const appThemes = new Map();
 let themeApplied = false;
+let firstTime = true;
+
+const darkModeMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+let systemThemeWatcherActive = false;
 
 function init() {
-  themes.forEach((theme) => add(theme));
+	themes.forEach((theme) => add(theme));
+	updateSystemThemeWatcher(settings.value.appTheme);
+	settings.on("update:appTheme", updateSystemThemeWatcher);
 }
 
 /**
@@ -28,39 +34,48 @@ function init() {
  * @returns {Theme[]}
  */
 function list() {
-  return Array.from(appThemes.keys()).map((name) => {
-    const { id, type, primaryColor, version } = appThemes.get(name);
-    return {
-      id,
-      type,
-      version,
-      primaryColor,
-      name: name.capitalize(),
-    };
-  });
+	return Array.from(appThemes.keys()).map((name) => {
+		const { id, type, primaryColor, version } = appThemes.get(name);
+		return {
+			id,
+			type,
+			version,
+			primaryColor,
+			name: name.capitalize(),
+		};
+	});
 }
 
 /**
- * 
- * @param {string} name 
+ *
+ * @param {string} name
  * @returns {ThemeBuilder}
  */
 function get(name) {
-  return appThemes.get(name.toLowerCase());
+	return appThemes.get(name.toLowerCase());
 }
 
 /**
- * 
- * @param {ThemeBuilder} theme 
- * @returns 
+ *
+ * @param {ThemeBuilder} theme
+ * @returns
  */
 function add(theme) {
-  if (!(theme instanceof ThemeBuilder)) return;
-  if (appThemes.has(theme.id)) return;
-  appThemes.set(theme.id, theme);
-  if (settings.value.appTheme === theme.id) {
-    apply(theme.id);
-  }
+	if (!(theme instanceof ThemeBuilder)) return;
+	if (appThemes.has(theme.id)) return;
+
+	appThemes.set(theme.id, theme);
+
+	const { appTheme } = settings.value;
+
+	if (theme.matches(appTheme)) {
+		if (appTheme !== "system") {
+			apply(appTheme);
+		} else {
+			updateSystemTheme(isDeviceDarkTheme());
+			themeApplied = true;
+		}
+	}
 }
 
 /**
@@ -68,86 +83,143 @@ function add(theme) {
  * @param {string} id The name of the theme to apply
  * @param {boolean} init Whether or not this is the first time the theme is being applied
  */
-async function apply(id, init) {
-  if (!DOES_SUPPORT_THEME) {
-    id = 'default';
-  }
+export async function apply(id, init) {
+	if (!DOES_SUPPORT_THEME) {
+		id = "default";
+	}
+	if (id.toLowerCase() === "system") {
+		// Refresh the mutable System theme before reading its preferred editor
+		// theme. Do not re-enter apply() while appTheme is being updated below.
+		updateSystemTheme(isDeviceDarkTheme(), false);
+	}
 
-  themeApplied = true;
-  const loaderFile = Url.join(ASSETS_DIRECTORY, 'res/tail-spin.svg');
-  const svgName = '__tail-spin__.svg';
-  const img = Url.join(DATA_STORAGE, svgName);
-  const theme = get(id);
-  const $style = document.head.get('style#app-theme') ?? <style id="app-theme"></style>;
-  const update = {
-    appTheme: id,
-  };
+	themeApplied = true;
+	const theme = get(id);
+	const $style = document.head.get("style#app-theme") ?? (
+		<style id="app-theme"></style>
+	);
+	const update = {
+		appTheme: id,
+	};
 
-  if (id === 'custom') {
-    update.customTheme = theme.toJSON();
-  }
+	if (id === "custom") {
+		update.customTheme = theme.toJSON();
+	}
 
-  if (init && theme.preferredEditorTheme) {
-    update.editorTheme = theme.preferredEditorTheme;
-    editorManager.editor.setTheme(theme.preferredEditorTheme);
-  }
+	if (init && theme.preferredEditorTheme) {
+		update.editorTheme = theme.preferredEditorTheme;
+		if (editorManager != null && editorManager.editor != null) {
+			editorManager.editor.setTheme(theme.preferredEditorTheme);
+		}
+	}
 
-  if (init && theme.preferredFont) {
-    update.editorFont = theme.preferredFont;
-    fonts.setFont(theme.preferredFont);
-  }
+	if (init && theme.preferredFont) {
+		update.editorFont = theme.preferredFont;
+		fonts.setFont(theme.preferredFont);
+	}
 
-  settings.update(update, false);
-  localStorage.__primary_color = theme.primaryColor;
-  document.body.setAttribute('theme-type', theme.type);
-  $style.textContent = theme.css;
-  document.head.append($style);
+	if (init && firstTime && theme.preferredTerminalTheme) {
+		update.terminalSettings = {
+			...(settings.value.terminalSettings || {}),
+			theme: theme.preferredTerminalTheme,
+		};
+	}
 
-  // Set status bar and navigation bar color
-  system.setUiTheme(
-    color(theme.primaryColor).hex.toString(),
-    theme.toJSON('hex'),
-  );
+	settings.update(update, false);
 
-  try {
-    let fs = fsOperation(loaderFile);
-    const svg = await fs.readFile('utf8');
+	if (init && firstTime && theme.preferredTerminalTheme) {
+		if (editorManager != null) {
+			updateActiveTerminals("theme", theme.preferredTerminalTheme);
+		}
+	}
 
-    fs = fsOperation(img);
-    if (!(await fs.exists())) {
-      await fsOperation(DATA_STORAGE).createFile(svgName);
-    }
-    await fs.writeFile(
-      svg.replace(/#fff/g, theme.primaryColor),
-    );
-  } catch (error) {
-    console.error(error);
-  }
+	localStorage.__primary_color = theme.primaryColor;
+	document.body.setAttribute("theme-type", theme.type);
+	$style.textContent = theme.css;
+	document.head.append($style);
+
+	const primaryColor = color(theme.primaryColor).hex.toString();
+	const scheme = theme.toJSON("hex");
+	// Set status bar and navigation bar color
+	system.setUiTheme(primaryColor, scheme);
+
+	if (firstTime) {
+		// To make sure system bars are updated
+		setTimeout(() => {
+			system.setUiTheme(primaryColor, scheme);
+		}, 1000);
+		firstTime = false;
+	}
 }
 
 /**
  * Update a theme
- * @param {ThemeBuilder} theme 
+ * @param {ThemeBuilder} theme
  */
-function update(theme) {
-  if (!(theme instanceof ThemeBuilder)) return;
-  const oldTheme = get(theme.id);
-  if (!oldTheme) {
-    add(theme);
-    return;
-  }
-  const json = theme.toJSON();
-  Object.keys(json).forEach((key) => {
-    oldTheme[key] = json[key];
-  });
+export function update(theme) {
+	if (!(theme instanceof ThemeBuilder)) return;
+	const oldTheme = get(theme.id);
+	if (!oldTheme) {
+		add(theme);
+		return;
+	}
+	const json = theme.toJSON();
+	Object.keys(json).forEach((key) => {
+		oldTheme[key] = json[key];
+	});
+}
+
+function syncSystemTheme(event, applyTheme = true) {
+	if (settings.value.appTheme.toLowerCase() !== "system") return;
+	const isDark = event ? event.matches : darkModeMediaQuery.matches;
+	updateSystemTheme(isDark, applyTheme);
+}
+
+function startSystemThemeWatcher() {
+	if (systemThemeWatcherActive) return;
+	systemThemeWatcherActive = true;
+	if (typeof darkModeMediaQuery.addEventListener === "function") {
+		darkModeMediaQuery.addEventListener("change", syncSystemTheme);
+	} else {
+		darkModeMediaQuery.addListener(syncSystemTheme);
+	}
+}
+
+function stopSystemThemeWatcher() {
+	if (!systemThemeWatcherActive) return;
+	systemThemeWatcherActive = false;
+	if (typeof darkModeMediaQuery.removeEventListener === "function") {
+		darkModeMediaQuery.removeEventListener("change", syncSystemTheme);
+	} else {
+		darkModeMediaQuery.removeListener(syncSystemTheme);
+	}
+}
+
+/**
+ * Start or stop syncing the app theme with the OS color scheme
+ * @param {string} theme
+ */
+export function updateSystemThemeWatcher(theme) {
+	if (String(theme).toLowerCase() === "system") {
+		startSystemThemeWatcher();
+		// Starting the watcher happens from the appTheme update listener. Applying
+		// the theme here would update appTheme again before the first settings
+		// update is saved, causing unbounded synchronous recursion.
+		syncSystemTheme(undefined, false);
+		return;
+	}
+	stopSystemThemeWatcher();
 }
 
 export default {
-  get applied() { return themeApplied; },
-  init,
-  list,
-  get,
-  add,
-  apply,
-  update,
+	get applied() {
+		return themeApplied;
+	},
+	init,
+	list,
+	get,
+	add,
+	apply,
+	update,
+	updateSystemThemeWatcher,
 };

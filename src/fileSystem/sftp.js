@@ -1,647 +1,595 @@
-import mimeType from 'mime-types';
-import Path from 'utils/Path';
-import Url from 'utils/Url';
-import settings from 'lib/settings';
-import internalFs from './internalFs';
-import { decode, encode } from 'utils/encodings';
-import helpers from 'utils/helpers';
+import settings from "lib/settings";
+import mimeType from "mime-types";
+import { decode, encode } from "utils/encodings";
+import helpers from "utils/helpers";
+import Path from "utils/Path";
+import Url from "utils/Url";
+import internalFs from "./internalFs";
+
+let pendingConnection = null;
+let pendingConnectionID = null;
 
 class SftpClient {
-  #MAX_TRY = 3;
-  #hostname;
-  #port;
-  #username;
-  #authenticationType;
-  #password;
-  #keyFile;
-  #passPhrase;
-  #base;
-  #connectionID;
-  #path;
-  #stat;
-  #retry = 0;
+	#MAX_TRY = 3;
+	#profileID;
+	#base;
+	#connectionID;
+	#path;
+	#stat;
 
-  /**
-   *
-   * @param {String} hostname
-   * @param {Number} port
-   * @param {String} username
-   * @param {{password?: String, passPhrase?: String, keyFile?: String}} authentication
-   */
-  constructor(hostname, port = 22, username, authentication) {
-    this.#hostname = hostname;
-    this.#port = port;
-    this.#username = username;
-    this.#authenticationType = !!authentication.keyFile ? 'key' : 'password';
-    this.#keyFile = authentication.keyFile;
-    this.#passPhrase = authentication.passPhrase;
-    this.#password = authentication.password;
-    this.#base = Url.formate({
-      protocol: 'sftp:',
-      hostname: this.#hostname,
-      port: this.#port,
-      username: this.#username,
-      password: this.#password,
-      query: {
-        passPhrase: this.#passPhrase,
-        keyFile: this.#keyFile,
-      },
-    });
+	/**
+	 *
+	 * @param {String} hostname
+	 * @param {Number} port
+	 * @param {String} username
+	 * @param {{profileID: String}} authentication
+	 */
+	constructor(hostname, port = 22, username, authentication) {
+		authentication ||= {};
+		this.#profileID = authentication.profileID;
+		if (!this.#profileID) {
+			throw new Error("A native SFTP profile is required");
+		}
+		this.#base = Url.formate({ protocol: "sftp:", hostname: this.#profileID });
 
-    this.#connectionID = `${this.#username}@${this.#hostname}`;
-  }
+		this.#connectionID = this.#profileID;
+	}
 
-  setPath(path) {
-    this.#path = path;
-  }
+	setPath(path) {
+		this.#path = path;
+	}
 
-  /**
-   * List directory or get file info
-   * @param {String} filename
-   * @param {boolean} stat
-   */
-  lsDir(filename = this.#path, stat = false) {
-    return new Promise((resolve, reject) => {
-      sftp.isConnected(async (connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+	/**
+	 * List directory or get file info
+	 * @param {String} filename
+	 * @param {boolean} stat
+	 */
+	lsDir(filename = this.#path) {
+		return new Promise((resolve, reject) => {
+			sftp.isConnected(async (connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-          const path = this.#safeName(filename);
-          let options = '-gaAG';
-          if (stat) options += 'd';
+					const path = this.#safeName(filename);
 
-          sftp.exec(
-            `ls ${options} --full-time "${path}" | awk '{$2=\"\"; print $0}'`,
-            (res) => {
-              if (res.code <= 0) {
-                if (stat) {
-                  resolve(this.#parseFile(res.result, Url.dirname(filename)));
-                  return;
-                }
-                resolve(this.#parseDir(filename, res.result));
-                return;
-              }
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      }, reject);
-    });
-  }
+					sftp.lsDir(
+						path,
+						(res) => {
+							res.forEach((file) => {
+								file.url = Url.join(this.#base, file.url);
+								file.type = mimeType.lookup(filename);
+								if (file.isLink) {
+									file.linkTarget = Url.join(this.#base, file.linkTarget);
+								}
+							});
+							resolve(res);
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			}, reject);
+		});
+	}
 
-  /**
-   *
-   * @param {String} filename
-   * @param {String} content
-   */
-  createFile(filename, content) {
-    filename = Path.join(this.#path, filename);
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+	/**
+	 *
+	 * @param {String} filename
+	 * @param {String} content
+	 */
+	createFile(filename, content) {
+		filename = Path.join(this.#path, filename);
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
+					sftp.createFile(
+						filename,
+						content ? content : "",
+						async (_res) => {
+							resolve(Url.join(this.#base, filename));
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			});
+		});
+	}
 
-          const file = this.#safeName(filename);
-          const cmd = `[[ -f "${file}" ]] && echo "Already exists" || touch "${filename}"`;
-          sftp.exec(
-            cmd,
-            async (res) => {
-              if (res.code <= 0) {
-                if (content) {
-                  try {
-                    await this.writeFile(content, filename);
-                  } catch (error) {
-                    return reject(error);
-                  }
-                }
+	/**
+	 *
+	 * @param {String} dirname
+	 */
+	createDir(dirname) {
+		dirname = Path.join(this.#path, dirname);
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-                const stat = await this.lsDir(filename, true);
-                resolve(stat.url);
-                return;
-              }
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      });
-    });
-  }
+					sftp.mkdir(
+						this.#safeName(dirname),
+						async (_res) => {
+							resolve(Url.join(this.#base, this.#safeName(dirname)));
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			});
+		});
+	}
 
-  /**
-   *
-   * @param {String} dirname
-   */
-  createDir(dirname) {
-    dirname = Path.join(this.#path, dirname);
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+	/**
+	 * Write to a file on server
+	 * @param {String|ArrayBuffer} content
+	 * @param {String} remotefile
+	 */
+	writeFile(content, remotefile) {
+		const filename = remotefile || this.#path;
+		const localFilename = this.#getLocalname(filename);
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					try {
+						if (this.#notConnected(connectionID)) {
+							await this.connect();
+						}
 
-          sftp.exec(
-            `mkdir "${this.#safeName(dirname)}"`,
-            async (res) => {
-              if (res.code <= 0) {
-                const stat = await this.lsDir(dirname, true);
-                resolve(stat.url);
-                return;
-              }
+						await internalFs.writeFile(localFilename, content, true, false);
+						const remoteFile = this.#safeName(filename);
+						sftp.putFile(remoteFile, localFilename, resolve, reject);
+					} catch (err) {
+						reject(err);
+					}
+				})();
+			}, reject);
+		});
+	}
 
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      });
-    });
-  }
+	/**
+	 * Read the file from server
+	 */
+	readFile() {
+		const filename = this.#path;
+		const localFilename = this.#getLocalname(filename);
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-  /**
-   * Write to a file on server
-   * @param {String|ArrayBuffer} content
-   * @param {String} remotefile
-   */
-  writeFile(content, remotefile) {
-    const filename = remotefile || this.#path;
-    const localFilename = this.#getLocalname(filename);
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          try {
-            if (this.#notConnected(connectionID)) {
-              await this.connect();
-            }
+					sftp.getFile(
+						this.#safeName(filename),
+						localFilename,
+						async () => {
+							try {
+								const data = await internalFs.readFile(localFilename);
+								resolve(data);
+							} catch (error) {
+								reject(error);
+							}
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			});
+		});
+	}
 
-            await internalFs.writeFile(localFilename, content, true, false);
-            const remoteFile = this.#safeName(filename);
-            sftp.putFile(remoteFile, localFilename, resolve, reject);
-          } catch (err) {
-            reject(err);
-          }
-        })();
-      }, reject);
-    });
-  }
+	async copyTo(dest) {
+		const src = this.#path;
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					try {
+						if (this.#notConnected(connectionID)) {
+							await this.connect();
+						}
 
-  /**
-   * Read the file from server
-   */
-  readFile() {
-    const filename = this.#path;
-    const localFilename = this.#getLocalname(filename);
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+						const srcStat = await this.stat();
 
-          sftp.getFile(
-            this.#safeName(filename),
-            localFilename,
-            async () => {
-              try {
-                const data = await internalFs.readFile(localFilename);
-                resolve(data);
-              } catch (error) {
-                reject(error);
-              }
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      });
-    });
-  }
+						if (srcStat.isDirectory) {
+							await this.#copyDirectory(src, dest);
+						} else {
+							await this.#copyFile(src, dest);
+						}
 
-  copyTo(dest) {
-    const src = this.#path;
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+						const finalPath = Path.join(dest, Path.basename(src));
+						resolve(Url.join(this.#base, finalPath));
+					} catch (error) {
+						reject(error);
+					}
+				})();
+			}, reject);
+		});
+	}
 
-          const cmd = `cp -r "${this.#safeName(src)}" "${this.#safeName(dest)}"`;
-          sftp.exec(
-            cmd,
-            async (res) => {
-              if (res.code <= 0) {
-                const stat = await this.lsDir(dest, true);
-                resolve(stat.url);
-                return;
-              }
+	async #copyFile(src, dest) {
+		const destPath = Path.join(dest, Path.basename(src));
+		const tempFile = this.#getLocalname(src);
 
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      }, reject);
-    });
-  }
+		// Download source file
+		await new Promise((resolve, reject) => {
+			sftp.getFile(this.#safeName(src), tempFile, resolve, reject);
+		});
 
-  moveTo(dest) {
-    return this.rename(dest, true);
-  }
+		// Upload
+		await new Promise((resolve, reject) => {
+			sftp.putFile(this.#safeName(destPath), tempFile, resolve, reject);
+		});
 
-  /**
-   * Renames file and directory, it can also be use to move directory or file
-   * @param {String} newname
-   * @param {Boolean} move
-   */
-  rename(newname, move) {
-    const src = this.#path;
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+		// Clean up temp file
+		try {
+			await internalFs.delete(tempFile);
+		} catch (error) {
+			console.warn("Failed to cleanup temp file:", error);
+		}
+	}
 
-          newname = move ? newname : Path.join(Path.dirname(src), newname);
-          const cmd = `mv "${this.#safeName(src)}" "${this.#safeName(newname)}"`;
-          sftp.exec(
-            cmd,
-            async (res) => {
-              if (res.code <= 0) {
-                const url = move ? Url.join(newname, Url.basename(src)) : newname;
-                const stat = await this.lsDir(url, true);
-                resolve(stat.url);
-                return;
-              }
+	async #copyDirectory(src, dest) {
+		// Create destination directory
+		const destDir = Path.join(dest, Path.basename(src));
+		await new Promise((resolve, reject) => {
+			sftp.mkdir(this.#safeName(destDir), resolve, reject);
+		});
 
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      }, reject);
-    });
-  }
+		// Get contents of source directory
+		const contents = await this.lsDir(src);
 
-  /**
-   * Delete file or directory
-   */
-  delete() {
-    const filename = this.#path;
-    const fullFilename = Url.join(this.#base, filename);
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
-          await this.#setStat();
-          const cmd = `rm ${this.#stat.isDirectory ? '-r' : ''} "${this.#safeName(filename)}"`;
-          sftp.exec(
-            cmd,
-            (res) => {
-              if (res.code <= 0) {
-                resolve(fullFilename);
-                return;
-              }
+		// Copy all items
+		for (const item of contents) {
+			const itemSrc = Path.join(src, item.name);
+			if (item.isDirectory) {
+				await this.#copyDirectory(itemSrc, destDir);
+			} else {
+				await this.#copyFile(itemSrc, destDir);
+			}
+		}
+	}
 
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      }, reject);
-    });
-  }
+	moveTo(dest) {
+		return this.rename(dest, true);
+	}
 
-  pwd() {
-    return new Promise((resolve, reject) => {
-      sftp.isConnected((connectionID) => {
-        (async () => {
-          if (this.#notConnected(connectionID)) {
-            try {
-              await this.connect();
-            } catch (error) {
-              reject(error);
-              return;
-            }
-          }
+	/**
+	 * Renames file and directory, it can also be use to move directory or file
+	 * @param {String} newname
+	 * @param {Boolean} move
+	 */
+	rename(newname, move) {
+		const src = this.#path;
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-          sftp.exec(
-            'pwd',
-            (res) => {
-              if (res.code <= 0) {
-                resolve(res.result);
-                return;
-              }
+					newname = move ? newname : Path.join(Path.dirname(src), newname);
+					sftp.rename(
+						this.#safeName(src),
+						this.#safeName(newname),
+						async (_res) => {
+							const url = move ? Url.join(newname, Url.basename(src)) : newname;
+							resolve(Url.join(this.#base, url));
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			}, reject);
+		});
+	}
 
-              reject(this.#errorCodes(res.code));
-            },
-            (err) => {
-              reject(err);
-            },
-          );
-        })();
-      }, reject);
-    });
-  }
+	/**
+	 * Delete file or directory
+	 */
+	delete() {
+		const filename = this.#path;
+		const fullFilename = Url.join(this.#base, filename);
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
+					await this.#setStat();
+					sftp.rm(
+						this.#safeName(filename),
+						this.#stat.isDirectory ? true : false,
+						this.#stat.isDirectory ? true : false,
+						(_res) => {
+							resolve(fullFilename);
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			}, reject);
+		});
+	}
 
-  async connect() {
-    await new Promise((resolve, reject) => {
-      const retry = (err) => {
-        if (settings.value.retryRemoteFsAfterFail) {
-          if (++this.#retry > this.#MAX_TRY) {
-            this.#retry = 0;
-            reject(err);
-          } else {
-            this.connect()
-              .then(resolve)
-              .catch(reject);
-          }
-        } else {
-          reject(err);
-        }
-      };
+	pwd() {
+		return new Promise((resolve, reject) => {
+			sftp.isConnected((connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-      if (this.#authenticationType === 'key') {
-        sftp.connectUsingKeyFile(
-          this.#hostname,
-          this.#port,
-          this.#username,
-          this.#keyFile,
-          this.#passPhrase,
-          resolve,
-          retry,
-        );
-        return;
-      }
+					sftp.pwd(
+						(res) => {
+							resolve(res);
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			}, reject);
+		});
+	}
 
-      sftp.connectUsingPassword(
-        this.#hostname,
-        this.#port,
-        this.#username,
-        this.#password,
-        resolve,
-        retry,
-      );
-    });
-  }
+	async connect() {
+		if (pendingConnection) {
+			if (pendingConnectionID === this.#connectionID) {
+				return pendingConnection;
+			}
+			try {
+				await pendingConnection;
+			} catch {
+				// The next profile should still get its own connection attempt.
+			}
+			return this.connect();
+		}
 
-  async exists() {
-    return (await this.stat()).exists;
-  }
+		pendingConnectionID = this.#connectionID;
+		pendingConnection = this.#connectWithRetry();
 
-  async stat() {
-    if (this.#stat) return this.#stat;
+		try {
+			return await pendingConnection;
+		} finally {
+			if (pendingConnectionID === this.#connectionID) {
+				pendingConnection = null;
+				pendingConnectionID = null;
+			}
+		}
+	}
 
-    const filename = this.#safeName(this.#path);
-    const file = await this.lsDir(filename, true);
-    if (!file) return null;
+	/**
+	 * Tests a profile once without the normal remote-filesystem retry policy.
+	 * @param {string} requestID Native request ID used for cancellation
+	 */
+	testConnection(requestID) {
+		return new Promise((resolve, reject) => {
+			sftp.testProfile(this.#profileID, requestID, 10000, resolve, reject);
+		});
+	}
 
-    const stat = {
-      name: file.name,
-      exists: true,
-      length: file.size,
-      isFile: file.isFile,
-      isDirectory: file.isDirectory,
-      isVirtual: file.isLink,
-      canWrite: file.canWrite,
-      canRead: file.canRead,
-      lastModified: file.modifiedDate,
-      type: mimeType.lookup(filename),
-      url: file.url,
-    };
+	/** Cancel an in-flight profile test. */
+	cancelConnection(requestID) {
+		return new Promise((resolve) => {
+			sftp.cancelConnection(requestID, resolve, resolve);
+		});
+	}
 
-    helpers.defineDeprecatedProperty(
-      stat,
-      'uri',
-      function () { return this.url; },
-      function (val) { this.url = val; },
-    );
+	async #connectWithRetry() {
+		const attempts = settings.value.retryRemoteFsAfterFail
+			? this.#MAX_TRY + 1
+			: 1;
+		let lastError;
 
-    return stat;
-  }
+		for (let attempt = 0; attempt < attempts; attempt++) {
+			try {
+				return await this.#connectWithHostVerification();
+			} catch (error) {
+				if (error?.nonRetryable) throw error;
+				lastError = error;
+			}
+		}
 
-  get localName() {
-    return this.#getLocalname(this.#path);
-  }
+		throw lastError;
+	}
 
-  /**
-   *
-   * @param {String} dirname
-   * @param {String} res
-   */
-  #parseDir(dirname, res) {
-    if (!res) return [];
+	async #connectWithHostVerification() {
+		return this.#connectOnce();
+	}
 
-    const list = res.split('\n');
+	#connectOnce() {
+		return new Promise((resolve, reject) => {
+			sftp.connectUsingProfile(this.#profileID, resolve, reject);
+		});
+	}
 
-    if (/total/.test(list[0])) list.splice(0, 1);
+	async exists() {
+		return (await this.stat()).exists;
+	}
 
-    const fileList = list.map((i) => this.#parseFile(i, dirname));
-    return fileList.filter((i) => !!i);
-  }
+	async stat() {
+		if (this.#stat) return this.#stat;
 
-  #parseFile(item, dirname) {
-    if (!item) return null;
-    const PERMISSIONS = 0;
-    const SIZE = 2;
-    const MODIFIED_DATE = 3;
-    const MODIFIED_TIME = 4;
-    const MODIFIED_TIME_ZONE = 5;
-    const NAME = 6;
-    const DIR_TYPE = (ch) => {
-      switch (ch) {
-        case 'd':
-          return 'directory';
-        case 'l':
-          return 'link';
-        default:
-          return 'file';
-      }
-    };
+		return new Promise((resolve, reject) => {
+			sftp.isConnected(async (connectionID) => {
+				(async () => {
+					if (this.#notConnected(connectionID)) {
+						try {
+							await this.connect();
+						} catch (error) {
+							reject(error);
+							return;
+						}
+					}
 
-    const itemData = item.split(' ');
-    const GET = (len, join = true) => {
-      const str = itemData.splice(len);
-      return join ? str.join(' ') : str;
-    };
+					const path = this.#safeName(this.#path);
 
-    let name = GET(NAME, false);
-    const modTimeZone = GET(MODIFIED_TIME_ZONE);
-    const modTime = GET(MODIFIED_TIME);
-    const modDate = GET(MODIFIED_DATE);
-    const size = parseInt(GET(SIZE)) || 0;
-    const permissions = GET(PERMISSIONS);
-    const date = new Date(`${modDate} ${modTime} ${modTimeZone}`);
-    const canrw = permissions.substr(1, 2);
-    const type = DIR_TYPE(permissions[0]);
+					sftp.stat(
+						path,
+						(res) => {
+							res.url = Url.join(this.#base, res.url);
+							res.type = mimeType.lookup(path);
+							if (res.isLink) {
+								res.linkTarget = Url.join(this.#base, res.linkTarget);
+							}
+							helpers.defineDeprecatedProperty(
+								res,
+								"uri",
+								function () {
+									return this.url;
+								},
+								function (val) {
+									this.url = val;
+								},
+							);
+							resolve(res);
+						},
+						(err) => {
+							reject(err);
+						},
+					);
+				})();
+			}, reject);
+		});
+	}
 
-    if (type === 'link') {
-      name.splice(name.indexOf('->'));
-    }
-    name = Url.basename(name.join(' '));
-    if (['..', '.', '`'].includes(name)) return null;
+	get localName() {
+		return this.#getLocalname(this.#path);
+	}
 
-    let url = dirname
-      ? Url.join(this.#base, dirname, name)
-      : Url.join(this.#base, name);
+	/**
+	 *
+	 * @param {String} name
+	 */
+	#safeName(name) {
+		const escapeCh = (str) => str.replace(/\\([^])|([`"])/g, "\\$1$2");
+		const ar = name.split("/");
+		return ar.map((dirname) => escapeCh(dirname)).join("/");
+	}
 
-    return {
-      url,
-      name,
-      size,
-      type,
-      uri: url,
-      canRead: /r/.test(canrw),
-      canWrite: /w/.test(canrw),
-      isDirectory: type === 'directory',
-      isLink: type === 'link',
-      isFile: type === 'file',
-      modifiedDate: date,
-    };
-  }
+	// #errorCodes(code, defaultMessage = strings["an error occurred"]) {
+	// 	switch (code) {
+	// 		case 0:
+	// 			return strings["success"];
+	// 		case 1:
+	// 			return strings["operation not permitted"];
+	// 		case 2:
+	// 			return strings["no such file or directory"];
+	// 		case 5:
+	// 			return strings["input/output error"];
+	// 		case 13:
+	// 			return strings["permission denied"];
+	// 		case 14:
+	// 			return strings["bad address"];
+	// 		case 17:
+	// 			return strings["file exists"];
+	// 		case 20:
+	// 			return strings["not a directory"];
+	// 		case 21:
+	// 			return strings["is a directory"];
+	// 		case 22:
+	// 			return strings["invalid argument"];
+	// 		case 23:
+	// 			return strings["too many open files in system"];
+	// 		case 24:
+	// 			return strings["too many open files"];
+	// 		case 26:
+	// 			return strings["text file busy"];
+	// 		case 27:
+	// 			return strings["file too large"];
+	// 		case 28:
+	// 			return strings["no space left on device"];
+	// 		case 30:
+	// 			return strings["read-only file system"];
+	// 		case 37:
+	// 			return strings["too many users"];
+	// 		case 110:
+	// 			return strings["connection timed out"];
+	// 		case 111:
+	// 			return strings["connection refused"];
+	// 		case 130:
+	// 			return strings["owner died"];
 
-  /**
-   *
-   * @param {String} name
-   */
-  #safeName(name) {
-    const escapeCh = (str) => str.replace(/\\([\s\S])|([`"])/g, '\\$1$2');
-    const ar = name.split('/');
-    return ar.map((dirname) => escapeCh(dirname)).join('/');
-  }
+	// 		default:
+	// 			return defaultMessage;
+	// 	}
+	// }
 
-  #errorCodes(code, defaultMessage = strings['an error occurred']) {
-    switch (code) {
-      case 0:
-        return strings['success'];
-      case 1:
-        return strings['operation not permitted'];
-      case 2:
-        return strings['no such file or directory'];
-      case 5:
-        return strings['input/output error'];
-      case 13:
-        return strings['permission denied'];
-      case 14:
-        return strings['bad address'];
-      case 17:
-        return strings['file exists'];
-      case 20:
-        return strings['not a directory'];
-      case 21:
-        return strings['is a directory'];
-      case 22:
-        return strings['invalid argument'];
-      case 23:
-        return strings['too many open files in system'];
-      case 24:
-        return strings['too many open files'];
-      case 26:
-        return strings['text file busy'];
-      case 27:
-        return strings['file too large'];
-      case 28:
-        return strings['no space left on device'];
-      case 30:
-        return strings['read-only file system'];
-      case 37:
-        return strings['too many users'];
-      case 110:
-        return strings['connection timed out'];
-      case 111:
-        return strings['connection refused'];
-      case 130:
-        return strings['owner died'];
+	/**
+	 *
+	 * @param {String} connectionID
+	 * @returns {Boolean}
+	 */
+	#notConnected(connectionID) {
+		return !connectionID || connectionID !== this.#connectionID;
+	}
 
-      default:
-        return defaultMessage;
-    }
-  }
+	/**
+	 *
+	 * @param {String} filename
+	 * @returns {String}
+	 */
+	#getLocalname(filename) {
+		return Url.join(
+			CACHE_STORAGE,
+			"sftp" + Url.join(this.#base, filename).hashCode(),
+		);
+	}
 
-  /**
-   *
-   * @param {String} connectionID
-   * @returns {Boolean}
-   */
-  #notConnected(connectionID) {
-    return !connectionID || connectionID !== this.#connectionID;
-  }
-
-  /**
-   *
-   * @param {String} filename
-   * @returns {String}
-   */
-  #getLocalname(filename) {
-    return Url.join(
-      CACHE_STORAGE,
-      'sftp' + Url.join(this.#base, filename).hashCode(),
-    );
-  }
-
-
-  async #setStat() {
-    if (!this.#stat) {
-      this.#stat = await this.stat();
-    }
-  }
+	async #setStat() {
+		if (!this.#stat) {
+			this.#stat = await this.stat();
+		}
+	}
 }
 
 /**
@@ -649,83 +597,81 @@ class SftpClient {
  * @param {String} host
  * @param {Number} port
  * @param {String} username
- * @param {{password?: String, passPhrase?: String, keyFile?: String}} authentication
+ * @param {{profileID: String}} authentication
  */
 function Sftp(host, port, username, authentication) {
-  return new SftpClient(host, port, username, authentication);
+	return new SftpClient(host, port, username, authentication);
 }
 
 Sftp.fromUrl = (url) => {
-  const { username, password, hostname, pathname, port, query } = Url.decodeUrl(url);
-  const { keyFile, passPhrase } = query;
-
-  const sftp = new SftpClient(hostname, port || 22, username, {
-    password,
-    keyFile,
-    passPhrase,
-  });
-
-  sftp.setPath(pathname);
-  return createFs(sftp);
+	const { hostname, pathname } = Url.decodeUrl(url);
+	if (hostname?.startsWith("profile-")) {
+		const sftp = new SftpClient(null, 22, null, { profileID: hostname });
+		sftp.setPath(pathname);
+		return createFs(sftp);
+	}
+	throw new Error(
+		"Legacy SFTP credentials must be migrated to a native profile",
+	);
 };
 
 Sftp.test = (url) => /^sftp:/.test(url);
 
 /**
- * 
- * @param {SftpClient} sftp 
+ *
+ * @param {SftpClient} sftp
  */
 function createFs(sftp) {
-  return {
-    lsDir() {
-      return sftp.lsDir();
-    },
-    async readFile(encoding) {
-      const { data } = await sftp.readFile();
+	return {
+		lsDir() {
+			return sftp.lsDir();
+		},
+		async readFile(encoding) {
+			const { data } = await sftp.readFile();
 
-      if (encoding) {
-        return decode(data, encoding);
-      }
+			if (encoding) {
+				return decode(data, encoding);
+			}
 
-      return data;
-    },
-    async writeFile(content, encoding) {
-      if (typeof content === 'string' && encoding) {
-        content = await encode(content, encoding);
-      }
+			return data;
+		},
+		async writeFile(content, encoding) {
+			if (typeof content === "string" && encoding) {
+				content = await encode(content, encoding);
+			}
 
-      return sftp.writeFile(content, null);
-    },
-    createFile(name, data) {
-      return sftp.createFile(name, data);
-    },
-    createDirectory(name) {
-      return sftp.createDir(name);
-    },
-    delete() {
-      return sftp.delete();
-    },
-    copyTo(dest) {
-      dest = Url.pathname(dest);
-      return sftp.copyTo(dest);
-    },
-    moveTo(dest) {
-      dest = Url.pathname(dest);
-      return sftp.moveTo(dest);
-    },
-    renameTo(newname) {
-      return sftp.rename(newname);
-    },
-    exists() {
-      return sftp.exists();
-    },
-    stat() {
-      return sftp.stat();
-    },
-    get localName() {
-      return sftp.localName;
-    }
-  };
+			return sftp.writeFile(content, null);
+		},
+		createFile(name, data) {
+			return sftp.createFile(name, data);
+		},
+		createDirectory(name) {
+			return sftp.createDir(name);
+		},
+		delete() {
+			return sftp.delete();
+		},
+		copyTo(dest) {
+			dest = Url.pathname(dest);
+			return sftp.copyTo(dest);
+		},
+		moveTo(dest) {
+			dest = Url.pathname(dest);
+			return sftp.moveTo(dest);
+		},
+		renameTo(newname) {
+			return sftp.rename(newname);
+		},
+		exists() {
+			return sftp.exists();
+		},
+		stat() {
+			return sftp.stat();
+		},
+		get localName() {
+			return sftp.localName;
+		},
+	};
 }
 
 export default Sftp;

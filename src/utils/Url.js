@@ -1,322 +1,355 @@
-import URLParse from 'url-parse';
-import path from './Path';
-import Uri from './Uri';
+import URLParse from "url-parse";
+import path from "./Path";
+import Uri from "./Uri";
 
 export default {
-  /**
-   * Returns basename from a url eg. 'index.html' from 'ftp://localhost/foo/bar/index.html'
-   * @param {string} url
-   * @returns {string}
-   */
-  basename(url) {
-    url = this.parse(url).url;
-    const protocol = this.getProtocol(url);
-    if (protocol === 'content:') {
-      try {
-        let { rootUri, docId, isFileUri } = Uri.parse(url);
+	/**
+	 * Returns basename from a url eg. 'index.html' from 'ftp://localhost/foo/bar/index.html'
+	 * @param {string} url
+	 * @returns {string}
+	 */
+	basename(url) {
+		url = this.parse(url).url;
+		const protocol = this.getProtocol(url);
+		if (protocol === "content:") {
+			try {
+				let { rootUri, docId, isFileUri } = Uri.parse(url);
 
-        if (isFileUri) return this.basename(rootUri);
+				if (isFileUri) return this.basename(rootUri);
 
-        if (docId.endsWith('/')) docId = docId.slice(0, -1);
-        docId = docId.split(':').pop();
-        return this.pathname(docId).split('/').pop();
-      } catch (error) {
-        return null;
-      }
-    } else {
-      if (url.endsWith('/')) url = url.slice(0, -1);
-      return this.pathname(url).split('/').pop();
-    }
-  },
+				if (docId.endsWith("/")) docId = docId.slice(0, -1);
+				docId = docId.split(":").pop();
+				return this.pathname(docId).split("/").pop();
+			} catch (error) {
+				return null;
+			}
+		} else {
+			if (url.endsWith("/")) url = url.slice(0, -1);
+			return this.pathname(url).split("/").pop();
+		}
+	},
 
-  /**
-   * Checks if given urls are same or not
-   * @param  {...String} urls 
-   * @returns {Boolean}
-   */
-  areSame(...urls) {
-    let firstUrl = urls[0];
-    if (firstUrl.endsWith('/')) firstUrl = firstUrl.slice(0, -1);
-    return urls.every(url => {
-      if (url.endsWith('/')) url = url.slice(0, -1);
-      return firstUrl === url;
-    });
-  },
+	/**
+	 * Checks if given urls are same or not
+	 * @param  {...String} urls
+	 * @returns {Boolean}
+	 */
+	areSame(...urls) {
+		let firstUrl = urls[0];
+		if (firstUrl.endsWith("/")) firstUrl = firstUrl.slice(0, -1);
+		return urls.every((url) => {
+			if (url.endsWith("/")) url = url.slice(0, -1);
+			return firstUrl === url;
+		});
+	},
 
-  /**
-   *
-   * @param {String} url
-   * returns the extension of the path, from the last occurrence of the . (period)
-   * character to end of string in the last portion of the path.
-   * If there is no . in the last portion of the path, or if there are no .
-   * characters other than the first character of the basename of path (see path.basename()),
-   * an empty string is returned.
-   * @returns {String}
-   */
-  extname(url) {
-    const name = this.basename(url);
-    if (name) return path.extname(name);
-    else return null;
-  },
-  /**
-   * Join all arguments together and normalize the resulting path.
-   * @param  {...string} pathnames
-   * @returns {String}
-   */
-  join(...pathnames) {
-    if (pathnames.length < 2)
-      throw new Error('Join(), requires atleast two parameters');
+	/**
+	 * Checks whether a URL is the same as, or nested below, a parent URL.
+	 * Query parameters are ignored and path segment boundaries are preserved.
+	 * @param {string} candidate
+	 * @param {string} parent
+	 * @returns {boolean}
+	 */
+	isSameOrDescendant(candidate, parent) {
+		const normalize = (value) => {
+			value = this.parse(value).url;
+			return value.endsWith("/") ? value.slice(0, -1) : value;
+		};
+		candidate = normalize(candidate);
+		parent = normalize(parent);
+		if (candidate === parent) return true;
+		return candidate.startsWith(`${parent}/`);
+	},
 
-    let { url, query } = this.parse(pathnames[0]);
+	/**
+	 *
+	 * @param {String} url
+	 * returns the extension of the path, from the last occurrence of the . (period)
+	 * character to end of string in the last portion of the path.
+	 * If there is no . in the last portion of the path, or if there are no .
+	 * characters other than the first character of the basename of path (see path.basename()),
+	 * an empty string is returned.
+	 * @returns {String}
+	 */
+	extname(url) {
+		const name = this.basename(url);
+		if (name) return path.extname(name);
+		else return null;
+	},
+	/**
+	 * Join all arguments together and normalize the resulting path.
+	 * @param  {...string} pathnames
+	 * @returns {String}
+	 */
+	join(...pathnames) {
+		if (pathnames.length < 2)
+			throw new Error("Join(), requires at least two parameters");
 
-    const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || '';
+		let { url, query } = this.parse(pathnames[0]);
 
-    if (protocol === 'content://') {
-      try {
-        if (pathnames[1].startsWith('/')) pathnames[1] = pathnames[1].slice(1);
-        const contentUri = Uri.parse(url);
-        let [root, pathname] = contentUri.docId.split(':');
-        const newDocId = path.join(pathname, ...pathnames.slice(1));
-        if (/^content:\/\/com.termux/.test(url)) {
-          const rootCondition = root.endsWith('/');
-          const newDocIdCondition = newDocId.startsWith('/');
-          if (rootCondition === newDocIdCondition) {
-            root = root.slice(0, -1);
-          } else if (!rootCondition === !newDocIdCondition) {
-            root += '/';
-          }
-          return `${contentUri.rootUri}::${root}${newDocId}${query}`;
-        }
-        return `${contentUri.rootUri}::${root}:${newDocId}${query}`;
-      } catch (error) {
-        return null;
-      }
-    } else if (protocol) {
-      url = url.replace(new RegExp('^' + protocol), '');
-      pathnames[0] = url;
-      return protocol + path.join(...pathnames) + query;
-    } else {
-      return path.join(url, ...pathnames.slice(1)) + query;
-    }
-  },
-  /**
-   * Make url safe by encoding url components
-   * @param {string} url
-   * @returns {string}
-   */
-  safe(url) {
-    let { url: uri, query } = this.parse(url);
-    url = uri;
-    const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || '';
-    if (protocol) url = url.replace(new RegExp('^' + protocol), '');
-    const parts = url.split('/').map((part, i) => {
-      if (i === 0) return part;
-      return fixedEncodeURIComponent(part);
-    });
-    return protocol + parts.join('/') + query;
+		const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || "";
 
-    function fixedEncodeURIComponent(str) {
-      return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
-        return '%' + c.charCodeAt(0).toString(16);
-      });
-    }
-  },
-  /**
-   * Gets pathname from url eg. gets '/foo/bar' from 'ftp://myhost.com/foo/bar'
-   * @param {string} url
-   * @returns {string}
-   */
-  pathname(url) {
-    if (typeof url !== 'string' || !this.PROTOCOL_PATTERN.test(url)) return url;
+		if (protocol === "content://") {
+			try {
+				if (pathnames[1].startsWith("/")) pathnames[1] = pathnames[1].slice(1);
+				const contentUri = Uri.parse(url);
+				let [root, pathname] = contentUri.docId.split(":");
+				let newDocId = path.join(pathname, ...pathnames.slice(1));
+				if (/^content:\/\/com.termux/.test(url)) {
+					const rootCondition = root.endsWith("/");
+					const newDocIdCondition = newDocId.startsWith("/");
+					if (rootCondition === newDocIdCondition) {
+						root = root.slice(0, -1);
+					} else if (!rootCondition === !newDocIdCondition) {
+						root += "/";
+					}
+					return `${contentUri.rootUri}::${root}${newDocId}${query}`;
+				}
 
-    url = url.split('?')[0];
-    const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || '';
+				// if pathname is undefined, meaning a docId/volume (e.g :primary:)
+				// has not been detected, so no newDocId's ":" will be added.
+				if (!pathname) {
+					// Ensure proper path separator between root and newDocId
+					let separator = "";
+					if (root.endsWith("/") && newDocId.startsWith("/")) {
+						// Both have separator, strip one from newDocId
+						newDocId = newDocId.slice(1);
+					} else if (!root.endsWith("/") && !newDocId.startsWith("/")) {
+						// Neither has separator, add one
+						separator = "/";
+					}
+					return `${contentUri.rootUri}::${root}${separator}${newDocId}${query}`;
+				}
+				return `${contentUri.rootUri}::${root}:${newDocId}${query}`;
+			} catch (error) {
+				return null;
+			}
+		} else if (protocol) {
+			url = url.replace(new RegExp("^" + protocol), "");
+			pathnames[0] = url;
+			return protocol + path.join(...pathnames) + query;
+		} else {
+			return path.join(url, ...pathnames.slice(1)) + query;
+		}
+	},
+	/**
+	 * Make url safe by encoding url components
+	 * @param {string} url
+	 * @returns {string}
+	 */
+	safe(url) {
+		let { url: uri, query } = this.parse(url);
+		url = uri;
+		const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || "";
+		if (protocol) url = url.replace(new RegExp("^" + protocol), "");
+		const parts = url.split("/").map((part, i) => {
+			if (i === 0) return part;
+			return fixedEncodeURIComponent(part);
+		});
+		return protocol + parts.join("/") + query;
 
-    if (protocol === 'content://') {
-      try {
-        const { rootUri, docId, isFileUri } = Uri.parse(url);
-        if (isFileUri) return this.pathname(rootUri);
-        else return '/' + (docId.split(':')[1] || docId);
-      } catch (error) {
-        return null;
-      }
-    } else {
-      if (protocol) url = url.replace(new RegExp('^' + protocol), '');
+		function fixedEncodeURIComponent(str) {
+			return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
+				return "%" + c.charCodeAt(0).toString(16);
+			});
+		}
+	},
+	/**
+	 * Gets pathname from url eg. gets '/foo/bar' from 'ftp://myhost.com/foo/bar'
+	 * @param {string} url
+	 * @returns {string}
+	 */
+	pathname(url) {
+		if (typeof url !== "string" || !this.PROTOCOL_PATTERN.test(url)) return url;
 
-      if (protocol !== 'file:///')
-        return '/' + url.split('/').slice(1).join('/');
+		url = url.split("?")[0];
+		const protocol = (this.PROTOCOL_PATTERN.exec(url) || [])[0] || "";
 
-      return '/' + url;
-    }
-  },
+		if (protocol === "content://") {
+			try {
+				const { rootUri, docId, isFileUri } = Uri.parse(url);
+				if (isFileUri) return this.pathname(rootUri);
+				else return "/" + (docId.split(":")[1] || docId);
+			} catch (error) {
+				return null;
+			}
+		} else {
+			if (protocol) url = url.replace(new RegExp("^" + protocol), "");
 
-  /**
-   * Returns dirname from url eg. 'ftp://localhost/foo/'  from 'ftp://localhost/foo/bar'
-   * @param {string} url
-   * @returns {string}
-   */
-  dirname(url) {
-    if (typeof url !== 'string') throw new Error('URL must be string');
+			if (protocol !== "file:///")
+				return "/" + url.split("/").slice(1).join("/");
 
-    const urlObj = this.parse(url);
-    url = urlObj.url;
-    const protocol = this.getProtocol(url);
+			return "/" + url;
+		}
+	},
 
-    if (protocol === 'content:') {
-      try {
-        let { rootUri, docId, isFileUri } = Uri.parse(url);
+	/**
+	 * Returns dirname from url eg. 'ftp://localhost/foo/'  from 'ftp://localhost/foo/bar'
+	 * @param {string} url
+	 * @returns {string}
+	 */
+	dirname(url) {
+		if (typeof url !== "string") throw new Error("URL must be string");
 
-        if (isFileUri) return this.dirname(rootUri);
-        else {
-          if (docId.endsWith('/')) docId = docId.slice(0, -1);
-          docId = [...docId.split('/').slice(0, -1), ''].join('/');
-          return Uri.format(rootUri, docId);
-        }
-      } catch (error) {
-        return null;
-      }
-    } else {
-      if (url.endsWith('/')) url = url.slice(0, -1);
-      return [...url.split('/').slice(0, -1), ''].join('/') + urlObj.query;
-    }
-  },
+		const urlObj = this.parse(url);
+		url = urlObj.url;
+		const protocol = this.getProtocol(url);
 
-  /**
-   * Parse given url into url and query
-   * @param {string} url
-   * @returns {{url:string, query:string}}}
-   */
-  parse(url) {
-    const [uri, query = ''] = url.split(/(?=\?)/);
-    return {
-      url: uri,
-      query,
-    };
-  },
+		if (protocol === "content:") {
+			try {
+				let { rootUri, docId, isFileUri } = Uri.parse(url);
 
-  /**
-   * Formate Url object to string
-   * @param {object} urlObj
-   * @param {"ftp:"|"sftp:"|"http:"|"https:"} urlObj.protocol
-   * @param {string|number} urlObj.hostname
-   * @param {string} [urlObj.path]
-   * @param {string} [urlObj.username]
-   * @param {string} [urlObj.password]
-   * @param {string|number} [urlObj.port]
-   * @param {object} [urlObj.query]
-   * @returns {string}
-   */
-  formate(urlObj) {
-    let { protocol, hostname, username, password, path, port, query } = urlObj;
+				if (isFileUri) return this.dirname(rootUri);
+				else {
+					if (docId.endsWith("/")) docId = docId.slice(0, -1);
+					docId = [...docId.split("/").slice(0, -1), ""].join("/");
+					return Uri.format(rootUri, docId);
+				}
+			} catch (error) {
+				return null;
+			}
+		} else {
+			if (url.endsWith("/")) url = url.slice(0, -1);
+			return [...url.split("/").slice(0, -1), ""].join("/") + urlObj.query;
+		}
+	},
 
-    const enc = (str) => encodeURIComponent(str);
+	/**
+	 * Parse given url into url and query
+	 * @param {string} url
+	 * @returns {{url:string, query:string}}}
+	 */
+	parse(url) {
+		const [uri, query = ""] = url.split(/(?=\?)/);
+		return {
+			url: uri,
+			query,
+		};
+	},
 
-    if (!protocol || !hostname)
-      throw new Error("Cannot formate url. Missing 'protocol' and 'hostname'.");
+	/**
+	 * Formate Url object to string
+	 * @param {object} urlObj
+	 * @param {"ftp:"|"sftp:"|"http:"|"https:"} urlObj.protocol
+	 * @param {string|number} urlObj.hostname
+	 * @param {string} [urlObj.path]
+	 * @param {string} [urlObj.username]
+	 * @param {string} [urlObj.password]
+	 * @param {string|number} [urlObj.port]
+	 * @param {object} [urlObj.query]
+	 * @returns {string}
+	 */
+	formate(urlObj) {
+		let { protocol, hostname, username, password, path, port, query } = urlObj;
 
-    let string = `${protocol}//`;
+		const enc = (str) => encodeURIComponent(str);
 
-    if (username && password) string += `${enc(username)}:${enc(password)}@`;
-    else if (username) string += `${username}@`;
+		if (!protocol || !hostname)
+			throw new Error("Cannot formate url. Missing 'protocol' and 'hostname'.");
 
-    string += hostname;
+		let string = `${protocol}//`;
 
-    if (port) string += `:${port}`;
+		if (username && password) string += `${enc(username)}:${enc(password)}@`;
+		else if (username) string += `${username}@`;
 
-    if (path) {
-      if (!path.startsWith('/')) path = '/' + path;
+		string += hostname;
 
-      string += path;
-    }
+		if (port) string += `:${port}`;
 
-    if (query && typeof query === 'object') {
-      string += '?';
+		if (path) {
+			if (!path.startsWith("/")) path = "/" + path;
 
-      for (let key in query) string += `${enc(key)}=${enc(query[key])}&`;
+			string += path;
+		}
 
-      string = string.slice(0, -1);
-    }
+		if (query && typeof query === "object") {
+			string += "?";
 
-    return string;
-  },
-  /**
-   * Returns protocol of a url e.g. 'ftp:' from 'ftp://localhost/foo/bar'
-   * @param {string} url
-   * @returns {"ftp:"|"sftp:"|"http:"|"https:"}
-   */
-  getProtocol(url) {
-    return (/^([a-z]+:)\/\/\/?/i.exec(url) || [])[1] || '';
-  },
-  /**
-   *
-   * @param {string} url
-   * @returns {string}
-   */
-  hidePassword(url) {
-    const { protocol, username, hostname, pathname } = URLParse(url);
-    if (protocol === 'file:') {
-      return url;
-    } else {
-      return `${protocol}//${username}@${hostname}${pathname}`;
-    }
-  },
-  /**
-   * Decodes url and returns username, password, hostname, pathname, port and query
-   * @param {string} url 
-   * @returns {URLObject}
-   */
-  decodeUrl(url) {
-    const uuid = 'uuid' + Math.floor(Math.random() + Date.now() * 1000000);
+			for (let key in query) string += `${enc(key)}=${enc(query[key])}&`;
 
-    if (/#/.test(url)) {
-      url = url.replace(/#/g, uuid);
-    }
+			string = string.slice(0, -1);
+		}
 
-    let { username, password, hostname, pathname, port, query } = URLParse(
-      url,
-      true,
-    );
+		return string;
+	},
+	/**
+	 * Returns protocol of a url e.g. 'ftp:' from 'ftp://localhost/foo/bar'
+	 * @param {string} url
+	 * @returns {"ftp:"|"sftp:"|"http:"|"https:"}
+	 */
+	getProtocol(url) {
+		return (/^([a-z]+:)\/\/\/?/i.exec(url) || [])[1] || "";
+	},
+	/**
+	 *
+	 * @param {string} url
+	 * @returns {string}
+	 */
+	hidePassword(url) {
+		const { protocol, username, hostname, pathname } = URLParse(url);
+		if (protocol === "file:") {
+			return url;
+		} else {
+			return `${protocol}//${username}@${hostname}${pathname}`;
+		}
+	},
+	/**
+	 * Decodes url and returns username, password, hostname, pathname, port and query
+	 * @param {string} url
+	 * @returns {URLObject}
+	 */
+	decodeUrl(url) {
+		const uuid = "uuid" + Math.floor(Math.random() + Date.now() * 1000000);
 
-    if (pathname) {
-      pathname = decodeURIComponent(pathname);
-      pathname = pathname.replace(new RegExp(uuid, 'g'), '#');
-    }
+		if (/#/.test(url)) {
+			url = url.replace(/#/g, uuid);
+		}
 
-    if (username) {
-      username = decodeURIComponent(username);
-    }
+		let { username, password, hostname, pathname, port, query } = URLParse(
+			url,
+			true,
+		);
 
-    if (password) {
-      password = decodeURIComponent(password);
-    }
+		if (pathname) {
+			pathname = decodeURIComponent(pathname);
+			pathname = pathname.replace(new RegExp(uuid, "g"), "#");
+		}
 
-    if (port) {
-      port = parseInt(port);
-    }
+		if (username) {
+			username = decodeURIComponent(username);
+		}
 
-    let { keyFile, passPhrase } = query;
+		if (password) {
+			password = decodeURIComponent(password);
+		}
 
-    if (keyFile) {
-      query.keyFile = decodeURIComponent(keyFile);
-    }
+		if (port) {
+			port = Number.parseInt(port);
+		}
 
-    if (passPhrase) {
-      query.passPhrase = decodeURIComponent(passPhrase);
-    }
+		let { keyFile, passPhrase } = query;
 
-    return { username, password, hostname, pathname, port, query };
-  },
-  /**
-   * Removes trailing slash from url
-   * @param {string} url 
-   * @returns 
-   */
-  trimSlash(url) {
-    const parsed = this.parse(url);
-    if (parsed.url.endsWith('/')) {
-      parsed.url = parsed.url.slice(0, -1);
-    }
-    return this.join(parsed.url, parsed.query);
-  },
-  PROTOCOL_PATTERN: /^[a-z]+:\/\/\/?/i,
+		if (keyFile) {
+			query.keyFile = decodeURIComponent(keyFile);
+		}
+
+		if (passPhrase) {
+			query.passPhrase = decodeURIComponent(passPhrase);
+		}
+
+		return { username, password, hostname, pathname, port, query };
+	},
+	/**
+	 * Removes trailing slash from url
+	 * @param {string} url
+	 * @returns
+	 */
+	trimSlash(url) {
+		const parsed = this.parse(url);
+		if (parsed.url.endsWith("/")) {
+			parsed.url = parsed.url.slice(0, -1);
+		}
+		return this.join(parsed.url, parsed.query);
+	},
+	PROTOCOL_PATTERN: /^[a-z]+:\/\/\/?/i,
 };

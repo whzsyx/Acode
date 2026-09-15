@@ -19,6 +19,14 @@ interface ShortCut {
   data: string;
 }
 
+interface FileShortcut {
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  uri: string;
+}
+
 interface Intent {
   action: string;
   data: string;
@@ -29,9 +37,39 @@ interface Intent {
   };
 }
 
+interface RewardStatus {
+  adFreeUntil: number;
+  lastExpiredRewardUntil: number;
+  isActive: boolean;
+  remainingMs: number;
+  redemptionsToday: number;
+  remainingRedemptions: number;
+  maxRedemptionsPerDay: number;
+  maxActivePassMs: number;
+  hasPendingExpiryNotice: boolean;
+  expiryNoticePendingUntil: number;
+  canRedeem: boolean;
+  redeemDisabledReason: string;
+  grantedDurationMs?: number;
+  appliedDurationMs?: number;
+  offerId?: string;
+}
+
 type FileAction = 'VIEW' | 'EDIT' | 'SEND' | 'RUN';
 type OnFail = (err: string) => void;
 type OnSuccessBool = (res: boolean) => void;
+
+interface HttpStreamOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  bodyIsBase64?: boolean;
+  followRedirects?: boolean;
+  connectTimeout?: number;
+  readTimeout?: number;
+  chunkSize?: number;
+  signal?: AbortSignal;
+}
 
 interface System {
   /**
@@ -131,6 +169,18 @@ interface System {
    * @param onFail
    */
   pinShortcut(id: string, onSuccess: OnSuccessBool, onFail: OnFail): void;
+
+  /**
+   * Pin a shortcut for a specific file to the home screen
+   * @param shortcut Shortcut configuration
+   * @param onSuccess
+   * @param onFail
+   */
+  pinFileShortcut(
+    shortcut: FileShortcut,
+    onSuccess: OnSuccessBool,
+    onFail: OnFail,
+  ): void;
   /**
    * Gets android version
    * @param onSuccess
@@ -188,19 +238,20 @@ interface System {
    */
   openInBrowser(src: string): void;
   /**
-   * Launches and app
-   * @param app
-   * @param action
-   * @param value
-   * @param onSuccess
-   * @param onFail
+   * Launch an Android application activity.
+   *
+   * @param app Package name of the application (e.g. `com.example.app`)
+   * @param className Fully qualified activity class name (e.g. `com.example.app.MainActivity`)
+   * @param extras Optional key-value pairs passed as Android Intent extras
+   * @param onSuccess Called when the activity launches successfully
+   * @param onFail Called if launching the activity fails
    */
   launchApp(
     app: string,
-    action: string,
-    value: string,
-    onSuccess: OnSuccessBool,
-    onFail: OnFail,
+    className: string,
+    extras?: Record<string, string | number | boolean>,
+    onSuccess?: OnSuccessBool,
+    onFail?: OnFail,
   ): void;
 
   /**
@@ -235,6 +286,49 @@ interface System {
    * @param onFail
    */
   getCordovaIntent(onSuccess: (intent: Intent) => void, onFail: OnFail): void;
+  getRewardStatus(
+    onSuccess: (status: RewardStatus | string) => void,
+    onFail: OnFail,
+  ): void;
+  redeemReward(
+    offerId: string,
+    onSuccess: (status: RewardStatus | string) => void,
+    onFail: OnFail,
+  ): void;
+  /**
+   * Enable/disable native WebView long-press context behavior.
+   * Use this when rendering a custom editor context menu.
+   * @param disabled
+   * @param onSuccess
+   * @param onFail
+   */
+  setNativeContextMenuDisabled(
+    disabled: boolean,
+    onSuccess?: () => void,
+    onFail?: OnFail,
+  ): void;
+  /**
+   * Perform an HTTP request and stream the response body to JavaScript.
+   *
+   * The response body is exposed as a WHATWG `ReadableStream` of `Uint8Array`
+   * chunks. The native layer does not buffer the whole response and performs
+   * no SSE/provider specific parsing. A 4xx/5xx status is a normal response;
+   * only transport failures reject the promise. Cancelling the returned
+   * stream's reader (or aborting `options.signal`) cancels the underlying
+   * native HTTP request.
+   *
+   * @param url Request URL
+   * @param options Request options
+   * @returns A `Response` whose `body` is a `ReadableStream` of `Uint8Array` chunks
+   */
+  httpStream(url: string, options?: HttpStreamOptions): Promise<Response>;
+  /*
+   * Change the app icon at runtime.
+   * @param iconName Icon id, e.g. "midnight_circuit", or "default" to restore the original icon
+   * @param onSuccess
+   * @param onFail
+   */
+  setAppIcon(iconName: string, onSuccess: OnSuccessBool, onFail: OnFail): void;
 }
 
 interface Window{

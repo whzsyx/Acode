@@ -8,11 +8,30 @@ module.exports = (env, options) => {
   const { mode = 'development' } = options;
   const rules = [
     {
-      test: /\.hbs$/,
+      test: /\.tsx?$/,
+      exclude: /node_modules/,
+      use: [
+        'html-tag-js/jsx/tag-loader.js',
+        {
+          loader: 'babel-loader',
+          options: {
+            presets: ['@babel/preset-env', '@babel/preset-typescript'],
+          },
+        },
+        {
+          loader: 'ts-loader',
+          options: {
+            transpileOnly: true, // Skip type checking for faster builds
+          },
+        },
+      ],
+    },
+    {
+      test: /\.(hbs|md)$/,
       use: ['raw-loader'],
     },
     {
-      test: /\.module.(sa|sc|c)ss$/,
+      test: /\.m.(sa|sc|c)ss$/,
       use: [
         'raw-loader',
         'postcss-loader',
@@ -20,20 +39,22 @@ module.exports = (env, options) => {
       ],
     },
     {
-      test: /(?<!\.module)\.(sa|sc|c)ss$/,
+      test: /\.svg$/,
+      resourceQuery: /raw/,
+      type: 'asset/source',
+    },
+    {
+      test: /\.(png|svg|jpg|jpeg|ico|ttf|webp|eot|woff|webm|mp4|webp|wav)(\?.*)?$/,
+      resourceQuery: { not: [/raw/] },
+      type: "asset/resource",
+    },
+    {
+      test: /(?<!\.m)\.(sa|sc|c)ss$/,
       use: [
         {
           loader: MiniCssExtractPlugin.loader,
-          options: {
-            publicPath: '../../',
-          },
         },
-        {
-          loader: 'css-loader',
-          options: {
-            url: false,
-          },
-        },
+        'css-loader',
         'postcss-loader',
         'sass-loader',
       ],
@@ -43,6 +64,7 @@ module.exports = (env, options) => {
   // if (mode === 'production') {
   rules.push({
     test: /\.m?js$/,
+    exclude: /node_modules\/(@codemirror|codemirror|marked)/, // Exclude CodeMirror and marked files from html-tag-js loader
     use: [
       'html-tag-js/jsx/tag-loader.js',
       {
@@ -53,27 +75,58 @@ module.exports = (env, options) => {
       },
     ],
   });
-  // }
 
-  clearOutputDir();
+  // Separate rule for CodeMirror files - only babel-loader, no html-tag-js
+  rules.push({
+    test: /\.m?js$/,
+    include: /node_modules\/(@codemirror|codemirror)/,
+    use: [
+      {
+        loader: 'babel-loader',
+        options: {
+          presets: ['@babel/preset-env'],
+        },
+      },
+    ],
+  });
+
+  // Separate rule for CodeMirror files - only babel-loader, no html-tag-js
+  rules.push({
+    test: /\.m?js$/,
+    include: /node_modules\/(@codemirror|codemirror)/,
+    use: [
+      {
+        loader: 'babel-loader',
+        options: {
+          presets: ['@babel/preset-env'],
+        },
+      },
+    ],
+  });
+  // }
 
   const main = {
     mode,
     entry: {
-      main: './src/lib/main.js',
+      main: './src/main.js',
       console: './src/lib/console.js',
+      consoleWorker: './src/lib/consoleWorker.js',
       searchInFilesWorker: './src/sidebarApps/searchInFiles/worker.js',
+      searchIndexWorker: './src/sidebarApps/searchInFiles/indexWorker.js',
     },
     output: {
-      path: path.resolve(__dirname, 'www/js/build/'),
-      filename: '[name].build.js',
-      chunkFilename: '[name].build.js',
-      publicPath: './js/build/',
+      path: path.resolve(__dirname, 'www/build/'),
+      filename: '[name].js',
+      chunkFilename: '[name].chunk.js',
+      assetModuleFilename: '[name][ext]',
+      publicPath: '/build/',
+      clean: true,
     },
     module: {
       rules,
     },
     resolve: {
+      extensions: ['.ts', '.tsx', '.js', '.mjs', '.json'],
       fallback: {
         path: require.resolve('path-browserify'),
         crypto: false,
@@ -82,25 +135,10 @@ module.exports = (env, options) => {
     },
     plugins: [
       new MiniCssExtractPlugin({
-        filename: '../../css/build/[name].css',
+        filename: '[name].css',
       }),
     ],
   };
 
   return [main];
 };
-
-function clearOutputDir() {
-  const css = path.join(WWW, 'css/build');
-  const js = path.join(WWW, 'js/build');
-
-  fs.rmSync(css, { recursive: true });
-  fs.rmSync(js, { recursive: true });
-
-  fs.mkdir(css, (err) => {
-    if (err) console.log(err);
-  });
-  fs.mkdir(js, (err) => {
-    if (err) console.log(err);
-  });
-}

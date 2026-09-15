@@ -1,10 +1,10 @@
-# Acode Editor - Code Editor for Android
+# Acode - Code Editor for Android
 
 <p align="center">
   <img src='res/logo_1.png' width='250'>
 </p>
 
-[![](https://img.shields.io/endpoint?label=Acode&style=flat-square&url=https%3A%2F%2Fmogyo.ro%2Fquart-apis%2Ftgmembercount%3Fchat_id%3Dfoxdebug_acode)](https://t.me/foxdebug_acode) [![](https://dcbadge.vercel.app/api/server/vVxVWYUAWD?style=flat)](https://discord.gg/vVxVWYUAWD)
+[![](https://img.shields.io/endpoint?logo=telegram&label=Acode&style=flat&url=https%3A%2F%2Facode.app%2Fapi%2Ftelegram-members-count)](https://t.me/foxdebug_acode) [![](https://dcbadge.vercel.app/api/server/vVxVWYUAWD?style=flat)](https://discord.gg/vVxVWYUAWD)
 
 ## • Overview
 
@@ -14,7 +14,9 @@ Welcome to Acode Editor - a powerful and versatile code editing tool designed sp
 
 - Edit and create websites, and instantly preview them in a browser.
 - Seamlessly modify source files for various languages like Python, Java, JavaScript, and more.
-- Access the console to quickly identify errors and logs.
+- Built-in javascript console
+- S/FTP and SSH terminal integration
+- Built-in terminal(Alpine)
 - Enjoy multi-language editing support with easy management tools.
 - Enjoy a large collections of community plugins to enhance your coding experience.
 
@@ -38,35 +40,37 @@ Acode/
 
 ## • Multi-language Support
 
-Enhance Acode's capabilities by adding new languages easily. Just create a file with the language code (e.g., en-us for English) in [`src/lang/`](https://github.com/deadlyjack/Acode/tree/main/src/lang) and include it in [`src/lib/lang.js`](https://github.com/deadlyjack/Acode/blob/main/src/lib/lang.js). Manage strings across languages effortlessly using utility commands:
+Enhance Acode's capabilities by adding new languages easily. Just create a file with the language code (e.g., en-us for English) in [`src/lang/`](https://github.com/Acode-Foundation/Acode/tree/main/src/lang) and include it in [`src/lib/lang.js`](https://github.com/Acode-Foundation/Acode/blob/main/src/lib/lang.js). Manage strings across languages effortlessly using utility commands:
 
 ```shell
-yarn lang add
-yarn lang remove
-yarn lang search
-yarn lang update
+pnpm run lang add
+pnpm run lang remove
+pnpm run lang search
+pnpm run lang update
 ```
 
-## • Building the Application
+## • Contributing & Building the Application
 
-To build the APK, ensure you have Node.js, NPM, and Apache Cordova installed on your device. Use Cordova CLI to build the application.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions.
 
-1. Initial setup (required only once):
+## • Contributors
 
-```shell
-yarn setup
-```
-
-2. Build the project:
-
-```shell
-yarn build <platform (android)> <free|paid> <p|prod|d|dev>
-```
+<a href="https://github.com/Acode-Foundation/Acode/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Acode-Foundation/Acode" />
+</a>
 
 ## • Developing a Plugin for Acode
 
-For comprehensive documentation on creating plugins for Acode Editor, visit the [repository](https://github.com/deadlyjack/acode-plugin).
+For comprehensive documentation on creating plugins for Acode Editor, visit the [repository](https://github.com/Acode-Foundation/acode-plugin).
 
-For plugin development information, refer to: [Acode Plugin Documentation](https://acode.app/plugin-docs)
+For plugin development information, refer to: [Acode Plugin Documentation](https://docs.acode.app/)
 
-> 💙 Empower your coding journey with the dynamic and efficient Acode Editor. Happy coding on-the-go!
+## Star History
+
+<a href="https://star-history.com/#Acode-Foundation/Acode&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Acode-Foundation/Acode&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Acode-Foundation/Acode&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Acode-Foundation/Acode&type=Date" />
+ </picture>
+</a>

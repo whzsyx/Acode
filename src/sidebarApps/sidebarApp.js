@@ -3,136 +3,173 @@ let $apps;
 /**@type {HTMLElement} */
 let $sidebar;
 /**@type {HTMLElement} */
-let $contaienr;
+let $container;
 
 export default class SidebarApp {
-  /**@type {HTMLSpanElement} */
-  #icon;
-  /**@type {string} */
-  #id;
-  /**@type {string} */
-  #init;
-  /**@type {string} */
-  #title;
-  /**@type {boolean} */
-  #active;
-  /**@type {(el:HTMLElement)=>void} */
-  #onselect;
-  /**@type {HTMLElement} */
-  #container;
+	/**@type {HTMLSpanElement} */
+	#icon;
+	/**@type {string} */
+	#id;
+	/**@type {(el:HTMLElement)=>(void|Function)} */
+	#init;
+	/**@type {string} */
+	#title;
+	/**@type {boolean} */
+	#active;
+	/**@type {(el:HTMLElement)=>void} */
+	#onselect;
+	/**@type {Function|null} */
+	#cleanup = null;
+	/**@type {HTMLElement} */
+	#container;
 
-  /**
-   * Creates a new sidebar app.
-   * @param {string} icon 
-   * @param {string} id 
-   * @param {string} title 
-   * @param {(el:HTMLElement)=>void} init 
-   * @param {(el:HTMLElement)=>void} onselect 
-   */
-  constructor(icon, id, title, init, onselect) {
-    const emptyFunc = () => { };
-    this.#container = <div className='container'></div>;
-    this.#icon = <Icon icon={icon} id={id} title={title} />;
-    this.#id = id;
-    this.#title = title;
-    this.#init = init || emptyFunc;
-    this.#onselect = onselect || emptyFunc;
-    this.#init(this.#container);
-  }
+	/**
+	 * Creates a new sidebar app.
+	 * @param {string} icon
+	 * @param {string} id
+	 * @param {string} title
+	 * @param {(el:HTMLElement)=>(void|Function)} init
+	 * @param {(el:HTMLElement)=>void} onselect
+	 */
+	constructor(icon, id, title, init, onselect) {
+		const emptyFunc = () => {};
+		this.#container = <div className="container"></div>;
+		this.#icon = <Icon icon={icon} id={id} title={title} />;
+		this.#id = id;
+		this.#title = title;
+		this.#init = init || emptyFunc;
+		this.#onselect = onselect || emptyFunc;
+		const cleanup = this.#init(this.#container);
+		if (typeof cleanup === "function") {
+			this.#cleanup = cleanup;
+		}
+	}
 
-  /**
-   * Installs the app in the sidebar.
-   * @param {boolean} prepend 
-   * @returns {void}
-   */
-  install(prepend = false) {
-    if (prepend) {
-      $apps.prepend(this.#icon);
-      return;
-    }
+	/**
+	 * Installs the app in the sidebar.
+	 * @param {boolean} prepend
+	 * @returns {void}
+	 */
+	install(prepend = false) {
+		if (prepend) {
+			$apps.prepend(this.#icon);
+			return;
+		}
 
-    $apps.append(this.#icon);
-  }
+		$apps.append(this.#icon);
+	}
 
-  /**
-   * Initialize the sidebar element.
-   * @param {HTMLElement} $el  sidebar element
-   * @param {HTMLElement} $el2 apps element
-   */
-  static init($el, $el2) {
-    $sidebar = $el;
-    $apps = $el2;
-  }
+	/**
+	 * Initialize the sidebar element.
+	 * @param {HTMLElement} $el  sidebar element
+	 * @param {HTMLElement} $el2 apps element
+	 */
+	static init($el, $el2) {
+		$sidebar = $el;
+		$apps = $el2;
+	}
 
-  /**@type {HTMLSpanElement} */
-  get icon() {
-    return this.#icon;
-  }
+	/**@type {HTMLSpanElement} */
+	get icon() {
+		return this.#icon;
+	}
 
-  /**@type {string} */
-  get id() {
-    return this.#id;
-  }
+	/**@type {string} */
+	get id() {
+		return this.#id;
+	}
 
-  /**@type {string} */
-  get title() {
-    return this.#title;
-  }
+	/**@type {string} */
+	get title() {
+		return this.#title;
+	}
 
-  /**@type {boolean} */
-  get active() {
-    return !!this.#active;
-  }
+	/**@type {boolean} */
+	get active() {
+		return !!this.#active;
+	}
 
-  /**@param {boolean} value */
-  set active(value) {
-    this.#active = !!value;
-    this.#icon.classList.toggle('active', this.#active);
-    if (this.#active) {
-      const child = getContainer(this.#container);
-      $sidebar.replaceChild($contaienr, child);
-      this.#onselect(this.#container);
-    }
-  }
+	/**@param {boolean} value */
+	set active(value) {
+		const nextValue = !!value;
+		if (this.#active === nextValue) return;
 
-  /**@type {HTMLElement} */
-  get container() {
-    return this.#container;
-  }
+		this.#active = nextValue;
+		this.#icon.classList.toggle("active", this.#active);
+		if (this.#active) {
+			const oldContainer = getContainer(this.#container);
+			// Try to replace the old container, or append if it's not in the DOM
+			try {
+				if (oldContainer && oldContainer.parentNode === $sidebar) {
+					$sidebar.replaceChild($container, oldContainer);
+				} else {
+					// Old container not in sidebar, just append the new one
+					const existingContainer = $sidebar.get(".container");
+					if (existingContainer) {
+						$sidebar.replaceChild($container, existingContainer);
+					} else {
+						$sidebar.appendChild($container);
+					}
+				}
+			} catch (error) {
+				// Fallback: append the new container
+				console.warn("Error switching sidebar container:", error);
+				const existingContainer = $sidebar.get(".container");
+				if (existingContainer) {
+					existingContainer.remove();
+				}
+				$sidebar.appendChild($container);
+			}
+			this.#onselect(this.#container);
+		}
+	}
 
-  /**@type {(el:HTMLElement)=>void} */
-  get init() {
-    return this.#init;
-  }
+	/**@type {HTMLElement} */
+	get container() {
+		return this.#container;
+	}
 
-  /**@type {(el:HTMLElement)=>void} */
-  get onselect() {
-    return this.#onselect;
-  }
+	/**@type {(el:HTMLElement)=>void} */
+	get init() {
+		return this.#init;
+	}
 
-  remove() {
-    this.#icon.remove();
-    this.#container.remove();
-    this.#icon = null;
-    this.#container = null;
-  }
+	/**@type {(el:HTMLElement)=>void} */
+	get onselect() {
+		return this.#onselect;
+	}
+
+	remove() {
+		this.#cleanup?.();
+		this.#cleanup = null;
+		if (this.#icon) {
+			this.#icon.remove();
+			this.#icon = null;
+		}
+		if (this.#container) {
+			this.#container.remove();
+			this.#container = null;
+		}
+	}
 }
 
 /**
  * Creates a icon element for a sidebar app.
- * @param {object} param0 
+ * @param {object} param0
  * @param {string} param0.icon
  * @param {string} param0.id
  * @returns {HTMLElement}
  */
 function Icon({ icon, id, title }) {
-  const className = `icon ${icon}`;
-  return <span
-    data-action='sidebar-app'
-    data-id={id}
-    title={title}
-    className={className}
-  ></span>;
+	const className = `icon ${icon}`;
+	return (
+		<span
+			data-action="sidebar-app"
+			data-id={id}
+			title={title}
+			className={className}
+		></span>
+	);
 }
 
 /**
@@ -141,11 +178,11 @@ function Icon({ icon, id, title }) {
  * @returns {HTMLElement}
  */
 function getContainer($el) {
-  const res = $contaienr;
+	const res = $container;
 
-  if ($el) {
-    $contaienr = $el;
-  }
+	if ($el) {
+		$container = $el;
+	}
 
-  return res || $sidebar.get('.container');
+	return res || $sidebar.get(".container");
 }

@@ -6,6 +6,7 @@
 <li action="rename">
   <span class="text">{{rename}}</span>
 </li>
+{{#is_editor}}
 <li action="syntax">
   <div class="text">
     <span>{{syntax highlighting}}</span>
@@ -24,13 +25,18 @@
     <span class="value">{{file_eol}}</span>
   </div>
 </li>
+{{/is_editor}}
+
+{{#is_editor}}
 <li action="read-only">
   <div class="text">
     <span>{{read only}}</span>
   </div>
   <label class="input-checkbox">
     <input type="checkbox" {{#file_read_only}}checked{{/file_read_only}}>
-    <span class="box"></span>
+    <span class="box">
+      <span class="handle"></span>
+    </span>
   </label>
 </li>
 <li action="format">
@@ -38,6 +44,13 @@
     <span>{{format}}</span>
   </div>
 </li>
+{{#has_lsp_servers}}
+<li action="lsp-info">
+  <span class="text">LSP Info</span>
+  <span class="icon zap"></span>
+</li>
+{{/has_lsp_servers}}
+{{/is_editor}}
 <hr>
 {{#file_on_disk}}
 <li action="share">
@@ -52,7 +65,30 @@
   <span class="text">{{edit with}}</span>
   <span class="icon edit"></span>
 </li>
+<li action="pin-file-shortcut">
+  <span class="text">{{add to home screen}}</span>
+  <span class="icon home"></span>
+</li>
 {{/file_on_disk}}
+
+<li action="toggle-pin-tab" value="{{file_id}}">
+  <span class="text">{{toggle_pin_tab_text}}</span>
+  <span class="{{toggle_pin_tab_icon}}"></span>
+</li>
+<li action="close-tabs-to-right" value="{{file_id}}">
+  <span class="text">{{close_tabs_to_right_text}}</span>
+  <span class="icon last_page"></span>
+</li>
+<li action="close-tabs-to-left" value="{{file_id}}">
+  <span class="text">{{close_tabs_to_left_text}}</span>
+  <span class="icon first_page"></span>
+</li>
+<li action="close-other-tabs" value="{{file_id}}">
+  <span class="text">{{close_other_tabs_text}}</span>
+  <span class="icon compare_arrows"></span>
+</li>
+
+{{#is_editor}}
 <hr>
 <li action="find">
   <span class="text">{{search}}</span>
@@ -94,3 +130,4 @@
     <span>{{select all}}</span>
   </div>
 </li>
+{{/is_editor}}

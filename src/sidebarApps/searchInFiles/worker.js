@@ -1,30 +1,35 @@
-import 'core-js/stable';
-import { minimatch } from 'minimatch';
+import "core-js/stable";
+import picomatch from "picomatch/posix";
+import { isBinaryFile } from "utils/binaryExtensions";
 
 const resolvers = {};
+let requestId = 0;
+const MAX_CONCURRENT_FILE_READS = 2;
+const RESULT_BATCH_SIZE = 200;
 
 self.onmessage = (ev) => {
-  const { action, data, error, id } = ev.data;
-  switch (action) {
-    case 'search-files':
-      processFiles(data, 'search');
-      break;
+	const { action, data, error, id } = ev.data;
+	switch (action) {
+		case "search-files":
+			processFiles(data, "search");
+			break;
 
-    case 'replace-files':
-      processFiles(data, 'replace');
-      break;
+		case "replace-files":
+			processFiles(data, "replace");
+			break;
 
-    case 'get-file': {
-      if (!resolvers[id]) return;
-      const cb = resolvers[id];
-      cb(data, error);
-      delete resolvers[id];
-      break;
-    }
+		case "result-ack":
+		case "get-file": {
+			if (!resolvers[id]) return;
+			const cb = resolvers[id];
+			cb(data, error);
+			delete resolvers[id];
+			break;
+		}
 
-    default:
-      return false;
-  }
+		default:
+			return false;
+	}
 };
 
 /**
@@ -33,39 +38,76 @@ self.onmessage = (ev) => {
  * @param {object} data - The data containing files, search, replace, and options.
  * @param {'search' | 'replace'} [mode='search'] - The mode of operation (search or replace).
  */
-function processFiles(data, mode = 'search') {
-  const process = mode === 'search' ? searchInFile : replaceInFile;
-  const { files, search, replace, options } = data;
-  const { test: skip } = Skip(options);
-  const total = files.length;
-  let count = 0;
+function processFiles(data, mode = "search") {
+	const process = mode === "search" ? searchInFile : replaceInFile;
+	const { files, search, replace, options } = data;
+	const { test: skip } = Skip(options);
+	const total = files.length;
+	let count = 0;
+	let cursor = 0;
+	let active = 0;
+	let pumpScheduled = false;
 
-  files.forEach(processFile);
+	if (!total) {
+		done(1, mode);
+		return;
+	}
 
-  /**
-  * Process a file for search or replace operation.
-  *
-  * @param {object} file - The file object to process.
-  * @param {string} file.url - The URL of the file.
-  */
-  function processFile(file) {
-    if (skip(file)) {
-      done(++count / total, mode);
-      return;
-    }
+	pump();
 
-    getFile(file.url, (res, err) => {
-      if (err) {
-        done(++count / total, mode);
-        throw err;
-      }
+	/**
+	 * Starts more file reads without flooding the main thread.
+	 */
+	function pump() {
+		pumpScheduled = false;
+		while (active < MAX_CONCURRENT_FILE_READS && cursor < total) {
+			const file = files[cursor++];
+			active += 1;
+			processFile(file);
+		}
+	}
 
-      process({ file, content: res, search, replace, options });
-      done(++count / total, mode);
-    });
-  }
+	function schedulePump() {
+		if (pumpScheduled) return;
+		pumpScheduled = true;
+		Promise.resolve().then(pump);
+	}
+
+	function finishOne() {
+		active -= 1;
+		done(++count / total, mode);
+		schedulePump();
+	}
+
+	/**
+	 * Process a file for search or replace operation.
+	 * @param {object} file
+	 */
+	function processFile(file) {
+		if (skip(file)) {
+			finishOne();
+			return;
+		}
+
+		getFile(file.url, async (res, err) => {
+			if (err) {
+				finishOne();
+				return;
+			}
+
+			self.postMessage({ action: "processing" });
+			await process({
+				file,
+				content: res,
+				search,
+				replace,
+				options,
+			});
+			self.postMessage({ action: "processed" });
+			finishOne();
+		});
+	}
 }
-
 
 /**
  * Search for a string in the content of a file.
@@ -74,37 +116,54 @@ function processFiles(data, mode = 'search') {
  * @param {string} arg.content - The file content.
  * @param {RegExp} arg.search - The string to search for.
  */
-function searchInFile({ file, content, search }) {
-  const matches = [];
-
-  let text = `${file.name}`;
-  let match;
-
-  if (text.length > 30) {
-    text = `...${text.slice(-30)}`;
-  }
-
-  while ((match = search.exec(content))) {
-    const [word] = match;
-    const start = match.index;
-    const end = start + word.length;
-    const position = {
-      start: getLineColumn(content, start),
-      end: getLineColumn(content, end)
-    };
-    const [line, renderText] = getSurrounding(content, word, start, end);
-    text += `\n\t${line.trim()}`;
-    matches.push({ match: word, position, renderText });
-  }
-
-  self.postMessage({
-    action: 'search-result',
-    data: {
-      file,
-      matches,
-      text,
-    },
-  });
+async function searchInFile({ file, content, search }) {
+	let matches = [];
+	search = new RegExp(search.source, search.flags);
+	async function flush() {
+		if (!matches.length) return;
+		const batch = matches;
+		matches = [];
+		await new Promise((resolve) => {
+			const id = ++requestId;
+			resolvers[id] = resolve;
+			self.postMessage({
+				action: "search-result",
+				id,
+				data: { file, matches: batch },
+			});
+		});
+		self.postMessage({ action: "processing" });
+	}
+	let cursor = 0;
+	let row = 0;
+	let column = 0;
+	function positionAt(offset) {
+		while (cursor < offset) {
+			if (content[cursor++] === "\n") {
+				row++;
+				column = 0;
+			} else column++;
+		}
+		return { row, column };
+	}
+	search.lastIndex = 0;
+	let match;
+	while ((match = search.exec(content))) {
+		const word = match[0];
+		const start = match.index;
+		const end = start + word.length;
+		const position = { start: positionAt(start), end: positionAt(end) };
+		const [line, renderText] = getSurrounding(content, word, start, end);
+		matches.push({ match: word.slice(0, 160), position, renderText, line });
+		if (matches.length >= RESULT_BATCH_SIZE) await flush();
+		if (!search.global && !search.sticky) break;
+		if (!word.length) {
+			// AdvanceStringIndex: don't restart inside a Unicode surrogate pair.
+			search.lastIndex =
+				end + (search.unicode && content.codePointAt(end) > 0xffff ? 2 : 1);
+		}
+	}
+	await flush();
 }
 
 /**
@@ -116,80 +175,51 @@ function searchInFile({ file, content, search }) {
  * @param {string} arg.replace - The string to replace with.
  */
 function replaceInFile({ file, content, search, replace }) {
-  const text = content.replace(search, replace);
+	const text = content.replace(search, replace);
 
-  self.postMessage({
-    action: 'replace-result',
-    data: { file, text },
-  });
+	self.postMessage({
+		action: "replace-result",
+		data: { file, text },
+	});
 }
 
 /**
  * Gets surrounding text of a match.
- * @param {string} content 
- * @param {string} word 
- * @param {number} start 
- * @param {number} end 
+ * @param {string} content
+ * @param {string} word
+ * @param {number} start
+ * @param {number} end
  */
 function getSurrounding(content, word, start, end) {
-  const max = 50;
-  const remaining = max - (end - start);
-  let result = [];
-
-  if (remaining <= 0) {
-    word = word.slice(-max);
-    result = [`...${word}`, word];
-  } else {
-    let left = Math.floor(remaining / 2);
-    let right = left;
-
-    let leftText = content.substring(start - left, start);
-    let rightText = content.substring(end, end + right);
-
-    result = [`${leftText}${word}${rightText}`, word];
-  }
-
-  return result.map((text) => text.replace(/[\r\n]+/g, ' ⏎ '));
-}
-
-/**
- * Determines the line and column numbers for a given position in the file.
- *
- * @param {string} file - The file content as a string.
- * @param {number} position - The position in the file for which line and column
- * numbers are to be determined.
- *
- * @returns {Object} An object with 'line' and 'column' properties, representing
- * the line and column numbers respectively for the given position.
- *
- * @example
- *
- * const file = 'Hello, this is a test.\nAnother test is here.';
- * const position = 15;
- * const lineColumn = getLineColumn(file, position);
- * 
- * // lineColumn: { line: 1, column: 16 }
- */
-function getLineColumn(file, position) {
-  const lines = file.substring(0, position).split('\n');
-  const lineNumber = lines.length - 1;
-  const columnNumber = lines[lineNumber].length;
-  return { row: lineNumber, column: columnNumber };
+	const max = 160;
+	const remaining = Math.max(0, max - (end - start));
+	let left = start;
+	const leftLimit = Math.max(0, start - Math.floor(remaining / 2));
+	while (left > leftLimit && !/[\r\n]/.test(content[left - 1])) left--;
+	let right = Math.min(end, start + max);
+	const rightLimit = Math.min(content.length, start + max - (start - left));
+	while (right < rightLimit && !/[\r\n]/.test(content[right])) right++;
+	let line = content.slice(left, right).trim();
+	if (left > 0 && !/[\r\n]/.test(content[left - 1])) line = `...${line}`;
+	if (right < content.length && !/[\r\n]/.test(content[right])) line += "...";
+	return [line, word.slice(0, max)].map((text) =>
+		text.replace(/[\r\n]+/g, " ⏎ "),
+	);
 }
 
 /**
  * Retrieves the contents of a file from the main thread.
- * @param {string} url 
- * @param {function} cb 
+ * @param {string} url
+ * @param {function} cb
  */
 function getFile(url, cb) {
-  const id = parseInt(Date.now() + Math.random() * 1000000);
-  resolvers[id] = cb;
-  self.postMessage({
-    action: 'get-file',
-    data: url,
-    id,
-  });
+	const id = ++requestId;
+	resolvers[id] = cb;
+	self.postMessage({
+		action: "get-file",
+		data: url,
+		id,
+	});
 }
 
 /**
@@ -199,22 +229,21 @@ function getFile(url, cb) {
  * @param {'search'|'replace'} mode
  */
 function done(ratio, mode) {
-  if (ratio === 1) {
-    self.postMessage({
-      action: 'progress',
-      data: 100,
-    });
-    self.postMessage({
-      action: `done-${mode === 'search' ? 'searching' : 'replacing'}`,
-    });
-  } else {
-    self.postMessage({
-      action: 'progress',
-      data: Math.floor(ratio * 100),
-    });
-  }
+	if (ratio === 1) {
+		self.postMessage({
+			action: "progress",
+			data: 100,
+		});
+		self.postMessage({
+			action: `done-${mode === "search" ? "searching" : "replacing"}`,
+		});
+	} else {
+		self.postMessage({
+			action: "progress",
+			data: Math.floor(ratio * 100),
+		});
+	}
 }
-
 
 /**
  * Creates a skip function that filters files based on exclusion and inclusion patterns.
@@ -224,25 +253,32 @@ function done(ratio, mode) {
  * @param {string} arg.include - The inclusion patterns separated by commas.
  */
 function Skip({ exclude, include }) {
-  const excludeFiles = (exclude ? exclude.split(',') : []).map((p) => p.trim());
-  const includeFiles = (include ? include.split(',') : ['**']).map((p) => p.trim());
+	const userExcludes = (exclude ? exclude.split(",") : [])
+		.map((p) => p.trim())
+		.filter(Boolean);
+	const excludeFiles = userExcludes;
+	const includeFiles = (include ? include.split(",") : ["**"]).map((p) =>
+		p.trim(),
+	);
 
-  /**
-   * Tests whether a file should be skipped based on exclusion and inclusion patterns.
-   *
-   * @param {object} file - The file to be tested.
-   * @param {string} file.path - The relative URL of the file.
-   * @returns {boolean} - Returns true if the file should be skipped, false otherwise.
-   */
-  function test(file) {
-    if (!file.path) return false;
-    const match = (pattern) => minimatch(file.path, pattern, { matchBase: true });
-    return excludeFiles.some(match) || !includeFiles.some(match);
-  }
+	/**
+	 * Tests whether a file should be skipped based on exclusion and inclusion patterns.
+	 *
+	 * @param {object} file - The file to be tested.
+	 * @param {string} file.path - The relative URL of the file.
+	 * @returns {boolean} - Returns true if the file should be skipped, false otherwise.
+	 */
+	function test(file) {
+		if (!file.path) return false;
+		if (isBinaryFile(file)) return true;
+		const match = (pattern) =>
+			picomatch.isMatch(file.path, pattern, { matchBase: true });
+		return excludeFiles.some(match) || !includeFiles.some(match);
+	}
 
-  return {
-    test
-  };
+	return {
+		test,
+	};
 }
 
 /**

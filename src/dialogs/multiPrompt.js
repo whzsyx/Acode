@@ -1,10 +1,10 @@
-import autosize from 'autosize';
-import inputhints from 'components/inputhints';
-import Checkbox from 'components/checkbox';
-import alert from './alert';
-import appSettings from 'lib/settings';
-import restoreTheme from 'lib/restoreTheme';
-import actionStack from 'lib/actionStack';
+import autosize from "autosize";
+import Checkbox from "components/checkbox";
+import inputhints from "components/inputhints";
+import actionStack from "lib/actionStack";
+import restoreTheme from "lib/restoreTheme";
+import appSettings from "lib/settings";
+import alert from "./alert";
 
 /**
  * @typedef {object} Input
@@ -22,6 +22,7 @@ import actionStack from 'lib/actionStack';
  * @property {boolean} [readOnly] Is read only
  * @property {boolean} [autofocus] Is autofocus
  * @property {boolean} [hidden] Is hidden
+ * @property {boolean} [sensitive] Clear the input when the prompt closes
  */
 
 /**
@@ -32,244 +33,292 @@ import actionStack from 'lib/actionStack';
  * @returns {Promise<Strings>}
  */
 export default function multiPrompt(message, inputs, help) {
-  return new Promise((resolve, reject) => {
-    const $title = tag('div', {
-      className: 'title',
-      child: tag('span', {
-        textContent: message
-      }),
-      style: {
-        justifyContent: 'space-between',
-      }
-    });
-    const $body = tag('div', {
-      className: 'message scroll',
-      style: {
-        fontSize: '1rem',
-      },
-    });
-    const okBtn = tag('button', {
-      type: 'submit',
-      textContent: strings.ok,
-      onclick: function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        const inputAr = [...$body.getAll('input')];
+	return new Promise((resolve, reject) => {
+		const $title = tag("div", {
+			className: "title",
+			child: tag("span", {
+				textContent: message,
+			}),
+			style: {
+				justifyContent: "space-between",
+			},
+		});
+		const $body = tag("div", {
+			className: "message scroll",
+			style: {
+				fontSize: "1rem",
+			},
+		});
+		const okBtn = tag("button", {
+			type: "submit",
+			textContent: strings.ok,
+			onclick: function (e) {
+				e.preventDefault();
+				e.stopPropagation();
+				const inputAr = [...$body.getAll("input")];
 
-        for (let $input of inputAr) {
-          if ($input.isRequired && !$input.value) {
-            $errorMessage.textContent = strings.required.capitalize();
-            const $sibling = $input.nextElementSibling;
-            const $parent = $input.parentElement;
-            if ($sibling) $parent.insertBefore($errorMessage, $sibling);
-            else $parent.append($errorMessage);
-            return;
-          }
-        }
-        hide();
-        resolve(getValue());
-      },
-    });
-    const cancelBtn = tag('button', {
-      textContent: strings.cancel,
-      type: 'button',
-      onclick: function () {
-        reject();
-        hide();
-      },
-    });
-    const $errorMessage = tag('span', {
-      className: 'error-msg',
-    });
-    const $mask = tag('span', {
-      className: 'mask',
-    });
-    const $promptDiv = tag('form', {
-      action: '#',
-      className: 'prompt multi',
-      onsubmit: (e) => {
-        e.preventDefault();
-        if (!okBtn.disabled) {
-          resolve(getValue());
-        }
-      },
-      children: [
-        $title,
-        $body,
-        tag('div', {
-          className: 'button-container',
-          children: [cancelBtn, okBtn],
-        }),
-      ],
-    });
+				for (let $input of inputAr) {
+					if ($input.isRequired && !$input.value) {
+						$errorMessage.textContent = strings.required.capitalize();
+						const $sibling = $input.nextElementSibling;
+						const $parent = $input.parentElement;
+						if ($sibling) $parent.insertBefore($errorMessage, $sibling);
+						else $parent.append($errorMessage);
+						return;
+					}
+				}
+				const values = getValue();
+				hide();
+				resolve(values);
+			},
+		});
+		const cancelBtn = tag("button", {
+			textContent: strings.cancel,
+			type: "button",
+			onclick: function () {
+				reject();
+				hide();
+			},
+		});
+		const $errorMessage = (
+			<span className="error-msg" style={{ display: "block" }} />
+		);
+		const $mask = <span className="mask" />;
+		const $promptDiv = tag("form", {
+			action: "#",
+			className: "prompt multi",
+			onsubmit: (e) => {
+				e.preventDefault();
+				if (!okBtn.disabled) {
+					const values = getValue();
+					hide();
+					resolve(values);
+				}
+			},
+			children: [
+				$title,
+				$body,
+				tag("div", {
+					className: "button-container",
+					children: [cancelBtn, okBtn],
+				}),
+			],
+		});
 
-    if (/^https?:/.test(help)) {
-      $title.append(tag('a', {
-        href: help,
-        className: 'icon help',
-      }));
-    } else if (typeof help === 'string') {
-      $title.append(tag('span', {
-        className: 'icon help',
-        onclick: () => {
-          alert(strings.info, help);
-        }
-      }));
-    }
+		if (/^https?:/.test(help)) {
+			$title.append(
+				tag("a", {
+					href: help,
+					className: "icon help",
+				}),
+			);
+		} else if (typeof help === "string") {
+			$title.append(
+				tag("span", {
+					className: "icon help",
+					onclick: () => {
+						alert(strings.info, help);
+					},
+				}),
+			);
+		}
 
-    inputs.map((input) => {
-      if (Array.isArray(input)) createGroup(input);
-      else $body.append(createInput(input));
-    });
+		inputs.map((input) => {
+			if (Array.isArray(input)) createGroup(input);
+			else $body.append(createInput(input));
+		});
 
-    actionStack.push({
-      id: 'prompt',
-      action: hidePrompt,
-    });
+		actionStack.push({
+			id: "prompt",
+			action: hidePrompt,
+		});
 
-    restoreTheme(true);
-    system.setInputType("NORMAL");
-    document.body.append($promptDiv, $mask);
-    const $focusEl = [...$body.getAll('input[autofocus]')].pop();
-    if ($focusEl) $focusEl.focus();
+		restoreTheme(true);
+		system.setInputType("NORMAL");
+		document.body.append($promptDiv, $mask);
+		const $focusEl = [...$body.getAll("input[autofocus]")].pop();
+		if ($focusEl) $focusEl.focus();
 
-    function hidePrompt() {
-      $promptDiv.classList.add('hide');
-      restoreTheme();
-      setTimeout(() => {
-        if ($promptDiv.isConnected) $promptDiv.remove();
-        if ($mask.isConnected) $mask.remove($mask);
-      }, 300);
-    }
+		function hidePrompt() {
+			clearSensitiveInputs();
+			$promptDiv.classList.add("hide");
+			restoreTheme();
+			setTimeout(() => {
+				if ($promptDiv.isConnected) $promptDiv.remove();
+				if ($mask.isConnected) $mask.remove($mask);
+			}, 300);
+		}
 
-    function hide() {
-      actionStack.remove('prompt');
-      system.setInputType(appSettings.value.keyboardMode);
-      hidePrompt();
-    }
+		function hide() {
+			actionStack.remove("prompt");
+			system.setInputType(appSettings.value.keyboardMode);
+			hidePrompt();
+		}
 
-    function getValue() {
-      const values = {};
-      const inputAr = [...$body.getAll('input')];
-      inputAr.map(($input) => {
-        if ($input.type === 'checkbox' || $input.type === 'radio')
-          values[$input.id] = $input.checked;
-        else values[$input.id] = $input.value;
-      });
+		function getValue() {
+			const values = {};
+			const inputAr = [...$body.getAll("input")];
+			inputAr.map(($input) => {
+				if ($input.type === "checkbox" || $input.type === "radio")
+					values[$input.id] = $input.checked;
+				else values[$input.id] = $input.value;
+			});
+			clearSensitiveInputs(inputAr);
 
-      return values;
-    }
+			return values;
+		}
 
-    /**
-     * Creates a group of inputs
-     * @param {Array<Input>} inputs Array of inputs
-     */
-    function createGroup(inputs) {
-      const $text = tag('span', {
-        className: 'hero',
-      });
-      const $group = tag('div', {
-        className: 'input-group',
-        child: $text,
-      });
+		function clearSensitiveInputs(inputs = [...$body.getAll("input")]) {
+			for (const $input of inputs) {
+				if ($input.type === "password" || $input.isSensitive) {
+					$input.value = "";
+				}
+			}
+		}
 
-      inputs.map((input) => {
-        let $input;
+		/**
+		 * Creates a group of inputs
+		 * @param {Array<Input>} inputs Array of inputs
+		 */
+		function createGroup(inputs) {
+			const $text = tag("span", {
+				className: "hero",
+			});
+			const $group = tag("div", {
+				className: "input-group",
+				child: $text,
+			});
 
-        if (typeof input === 'string') {
-          $text.textContent = input;
-        } else {
-          $input = createInput(input);
-          $group.append($input);
-        }
-      });
+			inputs.map((input) => {
+				let $input;
 
-      $body.append($group);
-    }
+				if (typeof input === "string") {
+					$text.textContent = input;
+				} else {
+					$input = createInput(input, true);
+					$group.append($input);
+				}
+			});
 
-    /**
-     * Creates an input
-     * @param {Input} input Input object
-     * @returns {HTMLInputElement|HTMLTextAreaElement}
-     */
-    function createInput(input) {
-      const {
-        id,
-        required,
-        type,
-        match,
-        value,
-        placeholder,
-        hints,
-        name,
-        disabled,
-        onclick,
-        onchange,
-        readOnly,
-        autofocus,
-        hidden,
-      } = input;
+			$body.append($group);
+		}
 
-      const inputType = type === 'textarea' ? 'textarea' : 'input';
-      let _type = type === 'filename' ? 'text' : type || 'text';
+		/**
+		 * Creates an input
+		 * @param {Input} input Input object
+		 * @param {boolean} group Whether the input is part of a group
+		 * @returns {HTMLInputElement|HTMLTextAreaElement}
+		 */
+		function createInput(input, group = false) {
+			const {
+				id,
+				required,
+				type,
+				match,
+				value,
+				placeholder,
+				hints,
+				name,
+				disabled,
+				onclick,
+				onchange,
+				readOnly,
+				autofocus,
+				hidden,
+				sensitive,
+			} = input;
 
-      let $input;
+			const inputType = type === "textarea" ? "textarea" : "input";
+			let _type = type === "filename" ? "text" : type || "text";
 
-      if (_type === 'checkbox' || _type === 'radio') {
-        $input = Checkbox(placeholder, value, name, id, type);
-      } else {
-        $input = tag(inputType, {
-          id,
-          placeholder,
-          value: value,
-          className: 'input',
-          isRequired: required,
-          readOnly,
-          autofocus,
-          hidden,
-        });
+			let $input;
 
-        if (value) {
-          setTimeout(() => {
-            $input.scrollLeft = $input.scrollWidth;
-          }, 0);
-        }
+			if (_type === "checkbox" || _type === "radio") {
+				$input = Checkbox(placeholder, value, name, id, type);
 
-        if (disabled) $input.disabled = true;
-        if (hints) inputhints($input, hints);
+				if (!group) {
+					$input.style.marginTop = "1rem";
+				}
+			} else {
+				$input = tag(inputType, {
+					id,
+					placeholder,
+					value: value,
+					className: "input",
+					isRequired: required,
+					readOnly,
+					autofocus,
+					hidden,
+				});
 
-        if (inputType === 'textarea') {
-          $input.rows = 1;
-          $input.inputMode = _type;
-          autosize($input);
-        } else {
-          $input.type = _type;
-        }
+				if (value) {
+					setTimeout(() => {
+						$input.scrollLeft = $input.scrollWidth;
+					}, 0);
+				}
 
-        $input.oninput = function () {
-          if (match && !match.test(this.value)) {
-            okBtn.disabled = true;
-            $promptDiv.insertBefore($errorMessage, $input.nextElementSibling);
-            $errorMessage.textContent = strings['invalid value'];
-          } else {
-            okBtn.disabled = false;
-            $errorMessage.textContent = '';
-          }
-        };
+				if (disabled) $input.disabled = true;
+				if (hints) inputhints($input, hints);
 
-        $input.onfocus = function () {
-          this.select();
-        };
-      }
+				if (inputType === "textarea") {
+					$input.rows = 1;
+					$input.inputMode = _type;
+					autosize($input);
+				} else {
+					$input.type = _type;
+				}
 
-      Object.defineProperty($input, 'prompt', {
-        value: { $body, hide },
-      });
+				$input.oninput = function () {
+					if (match && !match.test(this.value)) {
+						const $parent = this.parentElement;
+						if ($input.nextElementSibling) {
+							$parent.insertBefore($errorMessage, $input.nextElementSibling);
+						} else {
+							$parent.append($errorMessage);
+						}
+						$errorMessage.textContent = strings["invalid value"];
+						okBtn.disabled = true;
+					} else {
+						okBtn.disabled = false;
+						$errorMessage.textContent = "";
+					}
+				};
 
-      if (onclick) $input.onclick = onclick.bind($input);
-      if (onchange) $input.onchange = onchange.bind($input);
+				$input.onfocus = function () {
+					this.select();
+				};
+			}
 
-      return $input;
-    }
-  });
+			Object.defineProperty($input, "prompt", {
+				value: { $body, hide },
+			});
+			Object.defineProperty($input, "isSensitive", {
+				value: Boolean(sensitive),
+			});
+
+			Object.defineProperty($input, "setError", {
+				value(message) {
+					if (!message) {
+						$errorMessage.textContent = "";
+						okBtn.disabled = false;
+						return;
+					}
+
+					const $parent = this.parentElement;
+					if ($input.nextElementSibling) {
+						$parent.insertBefore($errorMessage, $input.nextElementSibling);
+					} else {
+						$parent.append($errorMessage);
+					}
+					$errorMessage.textContent = message;
+					okBtn.disabled = !!message;
+				},
+			});
+
+			if (onclick) $input.onclick = onclick.bind($input);
+			if (onchange) $input.onchange = onchange.bind($input);
+
+			return $input;
+		}
+	});
 }

@@ -1,20 +1,24 @@
-import { HARDKEYBOARDHIDDEN_NO, getSystemConfiguration } from 'lib/systemConfiguration';
-import KeyboardEvent from 'utils/keyboardEvent';
-import windowResize from './windowResize';
+import { setBannerKeyboardVisible } from "lib/startAd";
+import {
+	getSystemConfiguration,
+	HARDKEYBOARDHIDDEN_NO,
+} from "lib/systemConfiguration";
+import KeyboardEvent from "utils/keyboardEvent";
+import windowResize from "./windowResize";
 
 /**
  * Keyboard event list
  * @typedef {'key'|'keyboardShow'|'keyboardHide'|'keyboardShowStart'|'keyboardHideStart'} KeyboardEventName
  */
 
-// Asuming that keyboard height is at least 200px
+// Assuming that keyboard height is at least 200px
 let MIN_KEYBOARD_HEIGHT = 100;
 const event = {
-  key: [],
-  keyboardShow: [],
-  keyboardHide: [],
-  keyboardShowStart: [],
-  keyboardHideStart: [],
+	key: [],
+	keyboardShow: [],
+	keyboardHide: [],
+	keyboardShowStart: [],
+	keyboardHideStart: [],
 };
 
 let escKey = false;
@@ -24,149 +28,189 @@ let windowHeight = window.innerHeight;
 let currentWindowHeight = windowHeight;
 
 export const keydownState = {
-  /**
-   * Get esc key state
-   * @returns {boolean}
-   */
-  get esc() {
-    return escKey;
-  },
-  /**
-   * Set esc key state
-   * @param {boolean} val
-   */
-  set esc(val) {
-    escKey = val;
-    if (!val) return;
-    clearTimeout(escResetTimeout);
-    escResetTimeout = setTimeout(() => {
-      escKey = false;
-    }, 500);
-  }
+	/**
+	 * Get esc key state
+	 * @returns {boolean}
+	 */
+	get esc() {
+		return escKey;
+	},
+	/**
+	 * Set esc key state
+	 * @param {boolean} val
+	 */
+	set esc(val) {
+		escKey = val;
+		if (!val) return;
+		clearTimeout(escResetTimeout);
+		escResetTimeout = setTimeout(() => {
+			escKey = false;
+		}, 500);
+	},
 };
 
 /**
  * Handles keyboard events
- * @param {KeyboardEvent} e 
+ * @param {KeyboardEvent} e
  */
 export default function keyboardHandler(e) {
-  const $target = e.target;
-  const { key, ctrlKey, shiftKey, altKey, metaKey } = e;
+	const $target = e.target;
+	const { key, ctrlKey, shiftKey, altKey, metaKey } = e;
 
-  if ($target instanceof HTMLTextAreaElement) {
-    keydownState.esc = key === 'Escape';
-    return;
-  }
+	if (shouldIgnoreEditorShortcutTarget($target)) {
+		keydownState.esc = key === "Escape";
+		return;
+	}
 
-  if (!ctrlKey && !shiftKey && !altKey && !metaKey) return;
-  if (["Control", "Alt", "Meta", "Shift"].includes(key)) return;
+	if (!ctrlKey && !shiftKey && !altKey && !metaKey) return;
+	if (["Control", "Alt", "Meta", "Shift"].includes(key)) return;
 
-  const event = KeyboardEvent('keydown', { key, ctrlKey, shiftKey, altKey, metaKey });
-  const editor = editorManager.editor.textInput.getElement();
-  editor.dispatchEvent(event);
+	const target = editorManager?.editor?.contentDOM;
+	if (!target) return;
+
+	// Physical keyboard events already reaching CodeMirror should not be
+	// re-dispatched from the document listener.
+	if ($target === target || (target.contains?.($target) ?? false)) return;
+
+	const event = KeyboardEvent("keydown", {
+		key,
+		ctrlKey,
+		shiftKey,
+		altKey,
+		metaKey,
+	});
+	target?.dispatchEvent?.(event);
 }
 
-document.addEventListener('admob.banner.size', async (event) => {
-  const { height } = event.size;
-  MIN_KEYBOARD_HEIGHT = height + 10;
-});
+/**
+ * Returns true when a keyboard event target should keep the shortcut local
+ * instead of forwarding it into the editor.
+ * @param {EventTarget | null} target
+ * @returns {boolean}
+ */
+function shouldIgnoreEditorShortcutTarget(target) {
+	if (!(target instanceof Element)) return false;
 
-windowResize.on('resizeStart', async () => {
-  const { keyboardHeight, hardKeyboardHidden } = await getSystemConfiguration();
-  const externalKeyboard = hardKeyboardHidden === HARDKEYBOARDHIDDEN_NO;
+	return (
+		target instanceof HTMLInputElement ||
+		target instanceof HTMLTextAreaElement ||
+		target instanceof HTMLSelectElement ||
+		target.isContentEditable ||
+		!!target.closest(".prompt, #palette")
+	);
+}
 
+document.addEventListener("deviceready", () => {
+	document.addEventListener("admob.banner.size", async (event) => {
+		const { height } = event.size;
+		MIN_KEYBOARD_HEIGHT = height + 10;
+	});
 
-  if (currentWindowHeight > window.innerHeight) { // height decreasing
-    softKeyboardHeight = keyboardHeight > MIN_KEYBOARD_HEIGHT ? keyboardHeight : 0;
-    if (!externalKeyboard && softKeyboardHeight) {
-      emit('keyboardShowStart');
-    }
-  } else if (currentWindowHeight < window.innerHeight) { // height increasing
-    if (!externalKeyboard && softKeyboardHeight) {
-      emit('keyboardHideStart');
-    }
-  }
+	windowResize.on("resizeStart", async () => {
+		const { keyboardHeight, hardKeyboardHidden } =
+			await getSystemConfiguration();
+		const externalKeyboard = hardKeyboardHidden === HARDKEYBOARDHIDDEN_NO;
 
-  currentWindowHeight = window.innerHeight;
-});
+		if (currentWindowHeight > window.innerHeight) {
+			// height decreasing
+			softKeyboardHeight =
+				keyboardHeight > MIN_KEYBOARD_HEIGHT ? keyboardHeight : 0;
+			if (!externalKeyboard && softKeyboardHeight) {
+				toggleBannerAd(false);
+				emit("keyboardShowStart");
+			}
+		} else if (currentWindowHeight < window.innerHeight) {
+			// height increasing
+			if (!externalKeyboard && softKeyboardHeight) {
+				toggleBannerAd(true);
+				emit("keyboardHideStart");
+			}
+		}
 
-windowResize.on('resize', async () => {
-  currentWindowHeight = window.innerHeight;
+		currentWindowHeight = window.innerHeight;
+	});
 
-  if (currentWindowHeight > windowHeight) {
-    windowHeight = currentWindowHeight;
-  }
+	windowResize.on("resize", async () => {
+		currentWindowHeight = window.innerHeight;
 
-  const { hardKeyboardHidden } = await getSystemConfiguration();
-  const externalKeyboard = hardKeyboardHidden === HARDKEYBOARDHIDDEN_NO;
+		if (currentWindowHeight > windowHeight) {
+			windowHeight = currentWindowHeight;
+		}
 
-  if (externalKeyboard || !softKeyboardHeight) return;
+		const { hardKeyboardHidden } = await getSystemConfiguration();
+		const externalKeyboard = hardKeyboardHidden === HARDKEYBOARDHIDDEN_NO;
 
-  const keyboardHiddenYes = windowHeight <= window.innerHeight;
+		if (externalKeyboard || !softKeyboardHeight) return;
 
-  if (keyboardHiddenYes) {
-    emit('keyboardHide');
-  } else {
-    emit('keyboardShow');
-  }
+		const keyboardHiddenYes = windowHeight <= window.innerHeight;
 
-  focusBlurEditor(keyboardHiddenYes);
-  showHideAd(keyboardHiddenYes);
+		if (keyboardHiddenYes) {
+			emit("keyboardHide");
+		} else {
+			emit("keyboardShow");
+		}
+
+		focusBlurEditor(keyboardHiddenYes);
+	});
 });
 
 /**
  * Add event listener for keyboard event.
- * @param {KeyboardEventName} eventName 
- * @param {Function} callback 
- * @returns 
+ * @param {KeyboardEventName} eventName
+ * @param {Function} callback
+ * @returns
  */
 keyboardHandler.on = (eventName, callback) => {
-  if (!event[eventName]) return;
-  event[eventName].push(callback);
+	if (!event[eventName]) return;
+	event[eventName].push(callback);
 };
 
 /**
  * Remove event listener for keyboard event.
- * @param {KeyboardEventName} eventName 
- * @param {Function} callback 
- * @returns 
+ * @param {KeyboardEventName} eventName
+ * @param {Function} callback
+ * @returns
  */
 keyboardHandler.off = (eventName, callback) => {
-  if (!event[eventName]) return;
-  event[eventName] = event[eventName].filter(cb => cb !== callback);
+	if (!event[eventName]) return;
+	event[eventName] = event[eventName].filter((cb) => cb !== callback);
 };
 
 /**
-  * Emit keyboard event.
- * @param {KeyboardEventName} eventName 
- * @returns 
+ * Emit keyboard event.
+ * @param {KeyboardEventName} eventName
+ * @returns
  */
 function emit(eventName) {
-  if (!event[eventName]) return;
-  event[eventName].forEach(cb => cb());
+	if (!event[eventName]) return;
+	event[eventName].forEach((cb) => cb());
 }
 
 /**
- * Focus the editor if keyboard is visible, blur it otherwise.
- * @param {boolean} keyboardHidden 
- * @returns 
+ * Blur regular inputs when the soft keyboard is dismissed.
+ * Keep CodeMirror focused so its cursor remains visible after keyboard close.
+ * @param {boolean} keyboardHidden
+ * @returns
  */
 function focusBlurEditor(keyboardHidden) {
-  if (keyboardHidden) {
-    document.activeElement?.blur();
-  }
+	if (!keyboardHidden) return;
+
+	const activeElement = document.activeElement;
+	const editorContent = window.editorManager?.editor?.contentDOM;
+	if (
+		editorContent &&
+		(activeElement === editorContent || editorContent.contains(activeElement))
+	) {
+		return;
+	}
+
+	activeElement?.blur();
 }
 
 /**
  * Show ad if keyboard is hidden and ad is active, hide ad otherwise.
- * @param {boolean} keyboardHidden 
+ * @param {boolean} keyboardHidden
  */
-function showHideAd(keyboardHidden) {
-  const bannerIsActive = !!window.ad?.active;
-
-  if (!keyboardHidden && bannerIsActive) {
-    window.ad?.hide();
-  } else if (bannerIsActive) {
-    window.ad?.show();
-  }
+function toggleBannerAd(keyboardHidden) {
+	setBannerKeyboardVisible(!keyboardHidden);
 }

@@ -1,13 +1,19 @@
-import recents from './recents';
-import fsOperation from 'fileSystem';
-import EditorFile from './editorFile';
-import appSettings from './settings';
-import loader from 'dialogs/loader';
-import alert from 'dialogs/alert';
-import box from 'dialogs/box';
-import confirm from 'dialogs/confirm';
-import { decode } from 'utils/encodings';
-import { reopenWithNewEncoding } from 'palettes/changeEncoding';
+import fsOperation from "fileSystem";
+import { Text } from "@codemirror/state";
+import AudioPlayer from "components/audioPlayer";
+import alert from "dialogs/alert";
+import confirm from "dialogs/confirm";
+import loader from "dialogs/loader";
+import { reopenWithNewEncoding } from "palettes/changeEncoding";
+import { decode, detectEncoding } from "utils/encodings";
+import helpers from "utils/helpers";
+import EditorFile from "./editorFile";
+import { promoteSessionPersistence } from "./fileSessionPersistence";
+import fileTypeHandler from "./fileTypeHandler";
+import recents from "./recents";
+import appSettings from "./settings";
+
+let loadingFileCount = 0;
 
 /**
  * @typedef {object} FileOptions
@@ -18,6 +24,9 @@ import { reopenWithNewEncoding } from 'palettes/changeEncoding';
  * @property {string} encoding
  * @property {string} mode
  * @property {string} uri
+ * @property {string} paneId
+ * @property {boolean} persistInSession
+ * @property {AbortSignal} signal Discard an obsolete open before activating its file.
  */
 
 /**
@@ -27,124 +36,469 @@ import { reopenWithNewEncoding } from 'palettes/changeEncoding';
  */
 
 export default async function openFile(file, options = {}) {
-  try {
-    let uri = typeof file === 'string' ? file : file.uri;
-    if (!uri) return;
+	const { signal } = options;
+	if (signal?.aborted) return;
+	let releaseTitleLoader;
+	try {
+		let uri = typeof file === "string" ? file : file.uri;
+		if (!uri) return;
 
-    /**@type {EditorFile} */
-    const existingFile = editorManager.getFile(uri, 'uri');
-    const { cursorPos, render, onsave, text, mode, encoding } = options;
+		/**@type {EditorFile} */
+		const existingFile = editorManager.getFile(uri, "uri");
+		const {
+			cursorPos,
+			render,
+			onsave,
+			text,
+			mode,
+			encoding,
+			paneId,
+			persistInSession,
+		} = options;
 
-    if (existingFile) {
-      // If file is already opened and new text is provided
-      const existingText = existingFile.session.getValue();
-      const existingCursorPos = existingFile.session.selection.getCursor();
+		if (existingFile) {
+			promoteSessionPersistence(existingFile, persistInSession);
+			// If file is already opened and new text is provided
+			const incomingDoc =
+				text != null ? Text.of(String(text).split("\n")) : null;
 
-      // If file is already opened
-      existingFile.makeActive();
+			// If file is already opened
+			const targetPane = paneId
+				? editorManager.panes?.find((pane) => pane.id === paneId)
+				: null;
+			if (targetPane) {
+				editorManager.moveFileToPane?.(existingFile, targetPane, {
+					activate: true,
+				});
+			} else {
+				existingFile.makeActive();
+			}
 
-      if (onsave) {
-        existingFile.onsave = onsave;
-      }
+			const { editor } = editorManager;
 
+			if (onsave) {
+				existingFile.onsave = onsave;
+			}
 
-      if (text && existingText !== text) {
-        // let confirmation = true;
-        // if (existingFile.isUnsaved) {
-        //   const message = strings['reopen file'].replace('{file}', existingFile.filename);
-        //   confirmation = await confirm(strings.warning, message);
-        // }
-        // if (confirmation) {
-        // }
-        existingFile.session.setValue(text);
-      }
+			if (incomingDoc && !existingFile.session?.doc?.eq?.(incomingDoc)) {
+				// let confirmation = true;
+				// if (existingFile.isUnsaved) {
+				//   const message = strings['reopen file'].replace('{file}', existingFile.filename);
+				//   confirmation = await confirm(strings.warning, message);
+				// }
+				// if (confirmation) {
+				// }
+				editor.dispatch({
+					changes: {
+						from: 0,
+						to: editor.state.doc.length,
+						insert: String(text),
+					},
+				});
+			}
 
-      if (cursorPos && existingCursorPos.row !== cursorPos.row && existingCursorPos.column !== cursorPos.column) {
-        existingFile.session.selection.moveCursorTo(cursorPos.row, cursorPos.column);
-      }
+			// Move cursor if requested and different
+			try {
+				if (cursorPos) {
+					const cur = editor.getCursorPosition();
+					if (cur.row !== cursorPos.row || cur.column !== cursorPos.column) {
+						editor.gotoLine(cursorPos.row, cursorPos.column);
+					}
+				}
+			} catch (error) {
+				console.warn(
+					`Failed to move cursor for ${existingFile.filename || existingFile.uri}`,
+					error,
+				);
+			}
 
-      if (encoding && existingFile.encoding !== encoding) {
-        reopenWithNewEncoding(encoding);
-      }
-      return;
-    }
+			if (encoding && existingFile.encoding !== encoding) {
+				reopenWithNewEncoding(encoding);
+			}
+			return;
+		}
 
-    loader.showTitleLoader();
-    const settings = appSettings.value;
-    const fs = fsOperation(uri);
-    const fileInfo = await fs.stat();
-    const name = fileInfo.name || file.filename || uri;
-    const readOnly = fileInfo.canWrite ? false : true;
-    const createEditor = (isUnsaved, text) => {
-      new EditorFile(name, {
-        uri,
-        text,
-        cursorPos,
-        isUnsaved,
-        render,
-        onsave,
-        readOnly,
-        encoding,
-        SAFMode: mode,
-      });
-    };
+		releaseTitleLoader = acquireTitleLoader(signal);
+		const settings = appSettings.value;
+		const fs = fsOperation(uri);
+		const fileInfo = await fs.stat();
+		if (signal?.aborted) return;
+		const name = fileInfo.name || file.filename || uri;
+		const readOnly = fileInfo.canWrite === false;
+		const createEditor = (isUnsaved, text, detectedEncoding) => {
+			if (signal?.aborted) return;
+			new EditorFile(name, {
+				uri,
+				text,
+				cursorPos,
+				isUnsaved,
+				render,
+				onsave,
+				readOnly,
+				encoding: detectedEncoding || encoding,
+				SAFMode: mode,
+				savedMtime: helpers.getStatMtime(fileInfo),
+				diskMtime: helpers.getStatMtime(fileInfo),
+				paneId,
+				persistInSession,
+			});
+		};
 
-    if (text) {
-      // If file is not opened and has unsaved text
-      createEditor(true, text);
-      return;
-    }
+		// Check for registered file handlers
+		const customHandler = fileTypeHandler.getFileHandler(name);
+		if (customHandler) {
+			try {
+				await customHandler.handleFile({
+					name,
+					uri,
+					stats: fileInfo,
+					readOnly,
+					options: {
+						cursorPos,
+						render,
+						onsave,
+						encoding,
+						mode,
+						createEditor,
+						signal,
+					},
+				});
+				return;
+			} catch (error) {
+				if (signal?.aborted) return;
+				console.error(`File handler '${customHandler.id}' failed:`, error);
+				// Continue with default handling if custom handler fails
+			}
+		}
 
-    const videoRegex = /\.(mp4|webm|ogg)$/i;
-    const imageRegex = /\.(jpe?g|png|gif|webp)$/i;
-    const audioRegex = /\.(mp3|wav|ogg)$/i;
+		if (text) {
+			// If file is not opened and has unsaved text
+			createEditor(true, text);
+			return;
+		}
 
-    if (videoRegex.test(name)) {
-      const objectUrl = await fileToDataUrl(uri);
-      box(name, `<video src="${objectUrl}" controls autoplay loop style="max-width: 100%; max-height: 100%;"></video>`);
-      return;
-    }
+		const videoRegex = /\.(mp4|webm|ogg|mov|avi|wmv|flv|mkv|3gp)$/i;
+		const imageRegex = /\.(jpe?g|png|gif|webp|bmp|ico|avif|apng|tiff?)$/i;
+		const audioRegex = /\.(mp3|wav|ogg|m4a|aac|wma|flac|opus|3gp|mid|midi)$/i;
 
-    if (imageRegex.test(name)) {
-      const objectUrl = await fileToDataUrl(uri);
-      box(name, `<img src="${objectUrl}" style="max-width: 100%; max-height: 100%;" />`);
-      return;
-    }
+		if (videoRegex.test(name)) {
+			const objectUrl = await fileToDataUrl(uri);
+			if (signal?.aborted) {
+				URL.revokeObjectURL(objectUrl);
+				return;
+			}
+			const videoContainer = (
+				<div
+					style={{
+						width: "100%",
+						height: "100%",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}
+				></div>
+			);
 
-    if (audioRegex.test(name)) {
-      const objectUrl = await fileToDataUrl(uri);
-      box(name, `<audio src="${objectUrl}" controls autoplay loop style="max-width: 100%; max-height: 100%;"></audio>`);
-      return;
-    }
+			const videoEl = (
+				<video
+					src={objectUrl}
+					controls
+					style={{
+						maxWidth: "100%",
+						maxHeight: "100%",
+					}}
+				></video>
+			);
 
-    // Else open a new file
-    // Checks for valid file
-    if (fileInfo.length * 0.000001 > settings.maxFileSize) {
-      return alert(
-        strings.error.toUpperCase(),
-        strings['file too large'].replace(
-          '{size}',
-          settings.maxFileSize + 'MB',
-        ),
-      );
-    }
+			videoContainer.append(videoEl);
 
-    const binData = await fs.readFile();
-    const fileContent = await decode(binData, file.encoding || appSettings.value.defaultFileEncoding);
+			new EditorFile(name, {
+				uri,
+				type: "video",
+				tabIcon: "file file_type_video",
+				content: videoContainer,
+				render: true,
+				hideQuickTools: true,
+				paneId,
+			});
+			return;
+		}
 
-    if (/[\x00-\x08\x0E-\x1F]/.test(fileContent)) {
-      const confirmation = await confirm(strings.info, strings['binary file']);
-      if (!confirmation) return;
-    }
+		if (imageRegex.test(name)) {
+			const objectUrl = await fileToDataUrl(uri);
+			if (signal?.aborted) {
+				URL.revokeObjectURL(objectUrl);
+				return;
+			}
+			const imageContainer = (
+				<div
+					className="image-container"
+					style={{
+						width: "100%",
+						height: "100%",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						overflow: "hidden",
+						position: "relative",
+					}}
+				></div>
+			);
 
-    createEditor(false, fileContent);
-    if (mode !== 'single') recents.addFile(uri);
-    return;
-  } catch (error) {
-    console.error(error);
-  } finally {
-    loader.removeTitleLoader();
-  }
+			const imgEl = (
+				<img
+					src={objectUrl}
+					style={{
+						maxWidth: "100%",
+						maxHeight: "100%",
+						transformOrigin: "center",
+						transform: "scale(1) translate(0px, 0px)",
+						transition: "none",
+						cursor: "move",
+					}}
+				/>
+			);
+
+			let scale = 1;
+			let startX = 0;
+			let startY = 0;
+			let translateX = 0;
+			let translateY = 0;
+			let lastX = 0;
+			let lastY = 0;
+
+			function getBoundaries() {
+				const containerRect = imageContainer.getBoundingClientRect();
+				const imgRect = imgEl.getBoundingClientRect();
+
+				const maxX =
+					(imgRect.width * scale - containerRect.width) / (2 * scale);
+				const maxY =
+					(imgRect.height * scale - containerRect.height) / (2 * scale);
+
+				return {
+					maxX: Math.max(0, maxX),
+					maxY: Math.max(0, maxY),
+					minX: -Math.max(0, maxX),
+					minY: -Math.max(0, maxY),
+				};
+			}
+
+			function constrainTranslation() {
+				const bounds = getBoundaries();
+				translateX = Math.min(Math.max(translateX, bounds.minX), bounds.maxX);
+				translateY = Math.min(Math.max(translateY, bounds.minY), bounds.maxY);
+			}
+
+			// Zoom with mouse wheel
+			imageContainer.addEventListener("wheel", (e) => {
+				e.preventDefault();
+				const delta = e.deltaY > 0 ? -0.1 : 0.1;
+				const oldScale = scale;
+				scale = Math.max(0.1, Math.min(5, scale + delta));
+
+				// Adjust translation to zoom toward mouse position
+				const rect = imgEl.getBoundingClientRect();
+				const mouseX = e.clientX - rect.left;
+				const mouseY = e.clientY - rect.top;
+
+				const scaleChange = scale / oldScale;
+				translateX = mouseX - (mouseX - translateX) * scaleChange;
+				translateY = mouseY - (mouseY - translateY) * scaleChange;
+
+				constrainTranslation();
+				imgEl.style.transform = `scale(${scale}) translate(${translateX}px, ${translateY}px)`;
+			});
+
+			// Pan image with mouse drag or touch
+			imageContainer.addEventListener("mousedown", startDrag);
+			imageContainer.addEventListener("touchstart", (e) => {
+				if (e.touches.length === 1) {
+					startDrag(e.touches[0]);
+				} else if (e.touches.length === 2) {
+					const touch1 = e.touches[0];
+					const touch2 = e.touches[1];
+					startX = Math.abs(touch1.clientX - touch2.clientX);
+					startY = Math.abs(touch1.clientY - touch2.clientY);
+				}
+			});
+
+			function startDrag(e) {
+				lastX = e.clientX;
+				lastY = e.clientY;
+				document.addEventListener("mousemove", onDrag);
+				document.addEventListener("mouseup", stopDrag);
+				document.addEventListener("touchmove", onTouchDrag);
+				document.addEventListener("touchend", stopDrag);
+			}
+
+			function onDrag(e) {
+				const deltaX = e.clientX - lastX;
+				const deltaY = e.clientY - lastY;
+				translateX += deltaX / scale;
+				translateY += deltaY / scale;
+				lastX = e.clientX;
+				lastY = e.clientY;
+				constrainTranslation();
+				imgEl.style.transform = `scale(${scale}) translate(${translateX}px, ${translateY}px)`;
+			}
+
+			function onTouchDrag(e) {
+				if (e.touches.length === 1) {
+					const touch = e.touches[0];
+					const deltaX = touch.clientX - lastX;
+					const deltaY = touch.clientY - lastY;
+					translateX += deltaX / scale;
+					translateY += deltaY / scale;
+					lastX = touch.clientX;
+					lastY = touch.clientY;
+					constrainTranslation();
+					imgEl.style.transform = `scale(${scale}) translate(${translateX}px, ${translateY}px)`;
+				} else if (e.touches.length === 2) {
+					e.preventDefault();
+					const touch1 = e.touches[0];
+					const touch2 = e.touches[1];
+					const currentX = Math.abs(touch1.clientX - touch2.clientX);
+					const currentY = Math.abs(touch1.clientY - touch2.clientY);
+
+					const startDist = Math.sqrt(startX * startX + startY * startY);
+					const currentDist = Math.sqrt(
+						currentX * currentX + currentY * currentY,
+					);
+
+					const delta = (currentDist - startDist) / 100;
+					scale = Math.max(0.1, Math.min(5, scale + delta));
+					constrainTranslation();
+					imgEl.style.transform = `scale(${scale}) translate(${translateX}px, ${translateY}px)`;
+
+					startX = currentX;
+					startY = currentY;
+				}
+			}
+
+			function stopDrag() {
+				document.removeEventListener("mousemove", onDrag);
+				document.removeEventListener("mouseup", stopDrag);
+				document.removeEventListener("touchmove", onTouchDrag);
+				document.removeEventListener("touchend", stopDrag);
+			}
+
+			imageContainer.append(imgEl);
+
+			new EditorFile(name, {
+				uri,
+				type: "image",
+				tabIcon: "file file_type_image",
+				content: imageContainer,
+				render: true,
+				hideQuickTools: true,
+				paneId,
+			});
+			return;
+		}
+
+		if (audioRegex.test(name)) {
+			const objectUrl = await fileToDataUrl(uri);
+			if (signal?.aborted) {
+				URL.revokeObjectURL(objectUrl);
+				return;
+			}
+			const audioContainer = (
+				<div
+					style={{
+						width: "100%",
+						height: "100%",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+					}}
+				></div>
+			);
+
+			const audioPlayer = new AudioPlayer(audioContainer);
+			audioPlayer.loadTrack(objectUrl);
+
+			const audioTab = new EditorFile(name, {
+				uri,
+				type: "audio",
+				tabIcon: "file file_type_audio",
+				content: audioPlayer.container,
+				render: true,
+				hideQuickTools: true,
+				paneId,
+			});
+			audioTab.onclose = () => {
+				audioPlayer.cleanup();
+			};
+			return;
+		}
+
+		// Else open a new file
+		// Checks for valid file
+		if (fileInfo.length * 0.000001 > settings.maxFileSize) {
+			return alert(
+				strings.error.toUpperCase(),
+				strings["file too large"].replace(
+					"{size}",
+					settings.maxFileSize + "MB",
+				),
+			);
+		}
+
+		if (helpers.isBinary(uri)) {
+			const confirmation = await confirm(strings.info, strings["binary file"]);
+			if (!confirmation || signal?.aborted) return;
+		}
+
+		const binData = await fs.readFile();
+		if (signal?.aborted) return;
+
+		// Determine encoding: if explicit provided use it, otherwise
+		// if settings.defaultFileEncoding === 'auto' then detect; else use the default as-is
+		let detectedEncoding = file.encoding || encoding;
+		if (!detectedEncoding) {
+			const defaultSetting = appSettings.value.defaultFileEncoding;
+			if (defaultSetting === "auto") {
+				try {
+					detectedEncoding = await detectEncoding(binData);
+					if (detectedEncoding === "auto") detectedEncoding = "UTF-8";
+				} catch (error) {
+					console.warn("Encoding detection failed, using UTF-8:", error);
+					detectedEncoding = "UTF-8";
+				}
+			} else {
+				detectedEncoding = defaultSetting || "UTF-8";
+			}
+		}
+
+		if (signal?.aborted) return;
+		const fileContent = await decode(binData, detectedEncoding);
+		if (signal?.aborted) return;
+
+		createEditor(false, fileContent, detectedEncoding);
+		if (mode !== "single") recents.addFile(uri);
+		return;
+	} catch (error) {
+		if (!signal?.aborted) console.error(error);
+	} finally {
+		releaseTitleLoader?.();
+	}
+}
+
+/** Keep the shared indicator visible while any file open still needs it. */
+function acquireTitleLoader(signal) {
+	if (loadingFileCount++ === 0) loader.showTitleLoader();
+	let released = false;
+	const release = () => {
+		// An aborted filesystem call may settle much later. Release immediately
+		// on abort, and make its eventual finally block a no-op.
+		if (released) return;
+		released = true;
+		signal?.removeEventListener("abort", release);
+		if (--loadingFileCount === 0) loader.removeTitleLoader();
+	};
+	signal?.addEventListener("abort", release, { once: true });
+	return release;
 }
 
 /**
@@ -152,8 +506,8 @@ export default async function openFile(file, options = {}) {
  * @param {string} file file url
  */
 async function fileToDataUrl(file) {
-  const fs = fsOperation(file);
-  const fileInfo = await fs.stat();
-  const binData = await fs.readFile();
-  return URL.createObjectURL(new Blob([binData], { type: fileInfo.mime }));
+	const fs = fsOperation(file);
+	const fileInfo = await fs.stat();
+	const binData = await fs.readFile();
+	return URL.createObjectURL(new Blob([binData], { type: fileInfo.mime }));
 }

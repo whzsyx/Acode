@@ -19,7 +19,7 @@ body.no-animation {
   background-color: var(--popup-background-color);
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.2);
   box-shadow: 0 0 4px var(--box-shadow-color);
-  border-radius: 4px;
+  border-radius: var(--popup-border-radius);
 
   transform-origin: top center;
   animation: menu-grow 100ms ease 1;
@@ -54,7 +54,7 @@ body.no-animation {
     user-select: none;
 
     &.notice::after {
-      content: '•';
+      content: "•";
       color: rgb(255, 218, 12);
       font-size: 1.2em;
       margin-left: 2.5px;

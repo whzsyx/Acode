@@ -1,102 +1,283 @@
-import appSettings from 'lib/settings';
-import quickTools from 'components/quickTools';
-import KeyboardEvent from 'utils/keyboardEvent';
-import searchSettings from 'settings/searchSettings';
-import actionStack from 'lib/actionStack';
+import {
+	findNext as cmFindNext,
+	findPrevious as cmFindPrevious,
+	replaceAll as cmReplaceAll,
+	replaceNext as cmReplaceNext,
+	getSearchQuery,
+	SearchQuery,
+	setSearchQuery,
+} from "@codemirror/search";
+import { EditorView } from "@codemirror/view";
+import { executeCommand, getRegisteredCommands } from "cm/commandRegistry";
+import { focusEditorIfEditable } from "cm/editorReadOnly";
+import {
+	canQuickToolsEdit,
+	finishQuickToolsModifierInput,
+	focusQuickToolsModifierInput,
+	isSelectedRangeDeletion,
+	setQuickToolsModifierInputHandler,
+} from "cm/quickToolsModifierInput";
+import {
+	findQuickToolCommand,
+	mapQuickToolShiftText,
+} from "cm/quickToolsModifierKeys";
+import { runQuickToolKey } from "cm/quickToolsNavigation";
+import quickTools from "components/quickTools";
+import actionStack from "lib/actionStack";
+import searchHistory from "lib/searchHistory";
+import appSettings from "lib/settings";
+import searchSettings from "settings/searchSettings";
+import KeyboardEvent from "utils/keyboardEvent";
+import {
+	clearModifierState,
+	clearQuickToolsButtonFeedback,
+	removeActionStackEntries,
+	shouldCaptureModifierInput,
+} from "./quickToolsState";
+import {
+	captureReadOnlyQuickToolsKey,
+	createReadOnlyQuickToolsCaptureSession,
+} from "./readOnlyQuickToolsCapture";
+
+export let quickToolUsed = false;
 
 /**@type {HTMLInputElement | HTMLTextAreaElement} */
 let input;
+/** @type {number} */
+let quickToolUsedTimeout = null;
+let activeSearchState = null;
+/** @type {MutationObserver | null} */
+let searchCloseVisibilityObserver = null;
+/** @type {import("./readOnlyQuickToolsCapture").ReadOnlyQuickToolsCaptureSession<EditorView> | null} */
+let readOnlyCaptureSession = null;
 
 const state = {
-  shift: false,
-  alt: false,
-  ctrl: false,
-  meta: false,
+	shift: false,
+	alt: false,
+	ctrl: false,
+	meta: false,
 };
 
 const events = {
-  shift: [],
-  alt: [],
-  ctrl: [],
-  meta: [],
+	shift: [],
+	alt: [],
+	ctrl: [],
+	meta: [],
 };
+
+setQuickToolsModifierInputHandler(handleCodeMirrorQuickToolsTextInput);
 
 /**
  * @typedef { 'shift' | 'alt' | 'ctrl' | 'meta' } QuickToolsEvent
  * @typedef {(value: boolean)=>void} QuickToolsEventListener
  */
 
-quickTools.$input.addEventListener('input', (e) => {
-  const key = e.target.value.toUpperCase();
-  quickTools.$input.value = '';
-  if (!key || key.length > 1) return;
-  const keyCombination = getKeys({ key });
-
-  if (keyCombination.shiftKey && !keyCombination.ctrlKey) {
-    resetKeys();
-    editorManager.editor.insert(shiftKeyMapping(key));
-    return;
-  }
-
-  const event = KeyboardEvent('keydown', keyCombination);
-  input = input || editorManager.editor.textInput.getElement();
-
-  resetKeys();
-  input.dispatchEvent(event);
+quickTools.$input.addEventListener("beforeinput", (event) => {
+	handleReadOnlyQuickToolsCaptureEvent(event);
 });
 
-quickTools.$input.addEventListener('keydown', (e) => {
-  const { keyCode, key, which } = e;
-  const keyCombination = getKeys({ keyCode, key, which });
-
-  if (!['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'].includes(keyCombination.key)) return;
-  e.preventDefault();
-
-  const event = KeyboardEvent('keydown', keyCombination);
-  input = input || editorManager.editor.textInput.getElement();
-  input.dispatchEvent(event);
+quickTools.$input.addEventListener("compositionend", (event) => {
+	handleReadOnlyQuickToolsCaptureEvent(event);
 });
 
-appSettings.on('update:quicktoolsItems:after', () => {
-  setTimeout(() => {
-    if (actionStack.has('search-bar')) return;
-    const { $footer, $row1, $row2 } = quickTools;
-    const height = getFooterHeight();
-    $footer.content = [$row1, $row2].slice(0, height);
-  }, 100);
+quickTools.$input.addEventListener("input", (e) => {
+	if (handleReadOnlyQuickToolsCaptureEvent(e)) return;
+	const key = e.target.value.toUpperCase();
+	quickTools.$input.value = "";
+	if (!key || key.length > 1) return;
+	const keyCombination = getKeys({ key });
+	const target = getInput();
+	const codeMirrorView = getCodeMirrorInputView(target);
+
+	if (
+		codeMirrorView &&
+		runCodeMirrorQuickToolsTextKey(codeMirrorView, key, keyCombination)
+	) {
+		return;
+	}
+
+	if (
+		keyCombination.shiftKey &&
+		!keyCombination.ctrlKey &&
+		!keyCombination.altKey &&
+		!keyCombination.metaKey
+	) {
+		resetKeys();
+		insertText(shiftKeyMapping(key));
+		return;
+	}
+
+	resetKeys();
+	target.dispatchEvent(KeyboardEvent("keydown", keyCombination));
+	setQuicktoolsUsed();
 });
+
+quickTools.$input.addEventListener("keydown", (e) => {
+	if (handleReadOnlyQuickToolsCaptureEvent(e)) return;
+	const { keyCode, key, which } = e;
+	const keyCombination = getKeys({ keyCode, key, which });
+
+	if (
+		!["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(
+			keyCombination.key,
+		)
+	)
+		return;
+	e.preventDefault();
+
+	let target = getInput();
+	const codeMirrorView = getCodeMirrorInputView(target);
+	if (codeMirrorView) {
+		try {
+			const handled = runQuickToolKey(codeMirrorView, keyCode, keyCombination);
+			if (!handled && !codeMirrorView.state.readOnly) {
+				target.dispatchEvent(KeyboardEvent("keydown", keyCombination));
+			}
+		} finally {
+			if (codeMirrorView.state.readOnly) {
+				resetKeys();
+				dismissReadOnlyQuickToolsInput(codeMirrorView);
+			}
+			setQuicktoolsUsed();
+		}
+		return;
+	}
+	if (target === quickTools.$input) {
+		target = editorManager.editor?.contentDOM;
+	}
+
+	target?.dispatchEvent(KeyboardEvent("keydown", keyCombination));
+	setQuicktoolsUsed();
+});
+
+appSettings.on("update:quicktoolsItems:after", () => {
+	setTimeout(() => {
+		if (actionStack.has("search-bar")) return;
+		const { $footer, $row1, $row2 } = quickTools;
+		const height = getFooterHeight();
+		$footer.content = [$row1, $row2].slice(0, height);
+	}, 100);
+});
+
+let historyNavigationInitialized = false;
+// Initialize history navigation
+function setupHistoryNavigation() {
+	if (historyNavigationInitialized) return;
+	historyNavigationInitialized = true;
+	const { $searchInput, $replaceInput } = quickTools;
+
+	// Search input history navigation
+	if ($searchInput.el) {
+		$searchInput.el.addEventListener("keydown", (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+				e.preventDefault();
+				const { editor } = editorManager;
+				focusEditorIfEditable(editor);
+				actionStack.get("search-bar")?.action();
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				const newValue = searchHistory.navigateSearchUp($searchInput.el.value);
+				$searchInput.el.value = newValue;
+				// Trigger search
+				find(0, false);
+			} else if (e.key === "ArrowDown") {
+				e.preventDefault();
+				const newValue = searchHistory.navigateSearchDown(
+					$searchInput.el.value,
+				);
+				$searchInput.el.value = newValue;
+				// Trigger search
+				find(0, false);
+			} else if (e.key === "Enter" || e.key === "Escape") {
+				// Reset navigation on enter or escape
+				searchHistory.resetSearchNavigation();
+			}
+		});
+
+		// Reset navigation when user starts typing
+		$searchInput.el.addEventListener("input", () => {
+			searchHistory.resetSearchNavigation();
+		});
+	}
+
+	// Replace input history navigation
+	if ($replaceInput.el) {
+		$replaceInput.el.addEventListener("keydown", (e) => {
+			if (e.key === "ArrowUp") {
+				e.preventDefault();
+				const newValue = searchHistory.navigateReplaceUp(
+					$replaceInput.el.value,
+				);
+				$replaceInput.el.value = newValue;
+			} else if (e.key === "ArrowDown") {
+				e.preventDefault();
+				const newValue = searchHistory.navigateReplaceDown(
+					$replaceInput.el.value,
+				);
+				$replaceInput.el.value = newValue;
+			} else if (e.key === "Enter" || e.key === "Escape") {
+				// Reset navigation on enter or escape
+				searchHistory.resetReplaceNavigation();
+			}
+		});
+
+		// Reset navigation when user starts typing
+		$replaceInput.el.addEventListener("input", () => {
+			searchHistory.resetReplaceNavigation();
+		});
+	}
+}
 
 export const key = {
-  get shift() {
-    return state.shift;
-  },
-  get alt() {
-    return state.alt;
-  },
-  get ctrl() {
-    return state.ctrl;
-  },
-  get meta() {
-    return state.meta;
-  },
-  /**
-   * Add listener when key changes
-   * @param {QuickToolsEvent} event QuickTools event
-   * @param {QuickToolsEventListener} callback Callback to call when key changes
-   */
-  on(event, callback) {
-    events[event].push(callback);
-  },
-  /**
-   * Remove listener
-   * @param {QuickToolsEvent} event QuickTools event
-   * @param {QuickToolsEventListener} callback Callback to remove
-   */
-  off(event, callback) {
-    events[event] = events[event].filter((cb) => cb !== callback);
-  },
+	get shift() {
+		return state.shift;
+	},
+	get alt() {
+		return state.alt;
+	},
+	get ctrl() {
+		return state.ctrl;
+	},
+	get meta() {
+		return state.meta;
+	},
+	/**
+	 * Add listener when key changes
+	 * @param {QuickToolsEvent} event QuickTools event
+	 * @param {QuickToolsEventListener} callback Callback to call when key changes
+	 */
+	on(event, callback) {
+		events[event].push(callback);
+	},
+	/**
+	 * Remove listener
+	 * @param {QuickToolsEvent} event QuickTools event
+	 * @param {QuickToolsEventListener} callback Callback to remove
+	 */
+	off(event, callback) {
+		events[event] = events[event].filter((cb) => cb !== callback);
+	},
 };
 
+export function clearQuickToolsModifierState({ restoreFocus = false } = {}) {
+	const changed = clearModifierState(state, events);
+	if (!restoreFocus || !readOnlyCaptureSession?.consumed) {
+		clearReadOnlyCaptureSession();
+	}
+	if (restoreFocus) restoreQuickToolsTargetFocus();
+	return changed;
+}
+
+export function cancelQuickToolsModifierInput() {
+	clearReadOnlyCaptureSession();
+	const changed = clearQuickToolsModifierState();
+	quickTools.$input.value = "";
+	quickTools.$input.blur();
+	dismissReadOnlyQuickToolsInput(
+		getCodeMirrorInputView(input) || editorManager.editor,
+	);
+	return changed;
+}
 
 /**
  * Performs quick actions
@@ -105,207 +286,548 @@ export const key = {
  * @returns {boolean} Whether the action was performed
  */
 export default function actions(action, value) {
-  const { editor } = editorManager;
-  const { $input, $replaceInput } = quickTools;
+	setQuicktoolsUsed();
 
-  if (Object.keys(state).includes(action)) {
-    setInput();
-    value = !state[action];
-    state[action] = value;
-    events[action].forEach((cb) => cb(value));
-    if (Object.values(state).includes(true)) {
-      $input.focus();
-    } else if (input) {
-      input.focus();
-    } else {
-      $input.blur();
-    }
+	const { editor } = editorManager;
+	const { $input, $replaceInput } = quickTools;
 
-    return value;
-  }
+	if (Object.keys(state).includes(action)) {
+		setInput();
+		value = !state[action];
+		state[action] = value;
+		events[action].forEach((cb) => cb(value));
+		if (Object.values(state).includes(true)) {
+			const codeMirrorView = getCodeMirrorInputView(input);
+			const shouldCapture =
+				codeMirrorView?.state.readOnly ||
+				shouldCaptureModifierInput(state, Boolean(codeMirrorView));
+			if (shouldCapture) {
+				$input.value = "";
+				if (codeMirrorView?.state.readOnly) {
+					readOnlyCaptureSession = createReadOnlyQuickToolsCaptureSession(
+						codeMirrorView,
+						getQuickToolsModifierSnapshot(),
+					);
+					focusQuickToolsModifierInput(codeMirrorView, $input);
+				} else {
+					clearReadOnlyCaptureSession();
+					$input.focus();
+				}
+			} else {
+				clearReadOnlyCaptureSession();
+				if (codeMirrorView) focusEditorIfEditable(codeMirrorView);
+			}
+		} else {
+			clearReadOnlyCaptureSession();
+			restoreQuickToolsTargetFocus();
+		}
 
-  switch (action) {
-    case 'insert':
-      editor.insert(value);
-      return true;
+		return value;
+	}
 
-    case 'command':
-      editor.execCommand(value);
-      return true;
+	switch (action) {
+		case "insert":
+			return insertText(value);
 
-    case 'key': {
-      value = parseInt(value, 10);
-      const event = KeyboardEvent('keydown', getKeys({ keyCode: value }));
-      if (value > 40 && value < 37) {
-        resetKeys();
-      }
-      setInput();
-      input.dispatchEvent(event);
-      return true;
-    }
+		case "command": {
+			const commandName =
+				typeof value === "string" ? value : String(value ?? "");
+			if (!commandName) return false;
+			try {
+				return executeCommand(commandName, editor);
+			} finally {
+				if (editor?.state?.readOnly) cancelQuickToolsModifierInput();
+			}
+		}
 
-    case 'search':
-      toggleSearch();
-      return actionStack.has('search-bar');
+		case "key": {
+			value = Number.parseInt(value, 10);
+			const keyCombination = getKeys({ keyCode: value });
+			const shouldResetKeys = value < 37 || value > 40;
+			setInput();
+			try {
+				if (runCodeMirrorQuickToolKey(value, keyCombination)) {
+					return true;
+				}
+				if (isReadOnlyCodeMirrorInput(input)) return true;
+				getInput().dispatchEvent(KeyboardEvent("keydown", keyCombination));
+				return true;
+			} finally {
+				if (shouldResetKeys) resetKeys();
+				dismissReadOnlyQuickToolsInput(editor);
+			}
+		}
 
-    case 'toggle':
-      toggle();
-      return true;
+		case "search":
+			toggleSearch();
+			return actionStack.has("search-bar");
 
-    case 'set-height':
-      setHeight(value);
-      return true;
+		case "toggle":
+			toggle();
+			return true;
 
-    case 'search-prev':
-      find(1, true);
-      return true;
+		case "set-height":
+			if (typeof value === "object") {
+				setHeight(value.height, value.save);
+			} else {
+				setHeight(value);
+			}
+			return true;
 
-    case 'search-next':
-      find(1, false);
-      return true;
+		case "search-prev":
+			if (quickTools.$searchInput.el.value) {
+				searchHistory.addToHistory(quickTools.$searchInput.el.value);
+			}
+			find(1, true);
+			return true;
 
-    case 'search-settings':
-      searchSettings().show();
-      return true;
+		case "search-next":
+			if (quickTools.$searchInput.el.value) {
+				searchHistory.addToHistory(quickTools.$searchInput.el.value);
+			}
+			find(1, false);
+			return true;
 
-    case 'search-replace':
-      editor.replace($replaceInput.value || '');
-      return true;
+		case "search-settings":
+			searchSettings().show();
+			return true;
 
-    case 'search-replace-all':
-      editor.replaceAll($replaceInput.value || '');
-      return true;
+		case "search-replace":
+			if (blockReadOnlyQuickToolsEdit(editor)) return false;
+			if ($replaceInput.value) {
+				searchHistory.addToHistory($replaceInput.value);
+			}
+			if (editor) {
+				const replaceValue = getRefValue($replaceInput);
+				const query = applySearchQuery(
+					editor,
+					getRefValue(quickTools.$searchInput),
+					replaceValue,
+				);
+				if (query && query.search && query.valid) {
+					cmReplaceNext(editor);
+				}
+				updateSearchState();
+			}
+			return true;
 
-    default:
-      return false;
-  }
+		case "search-replace-all":
+			if (blockReadOnlyQuickToolsEdit(editor)) return false;
+			if ($replaceInput.value) {
+				searchHistory.addToHistory($replaceInput.value);
+			}
+			if (editor) {
+				const replaceValue = getRefValue($replaceInput);
+				const query = applySearchQuery(
+					editor,
+					getRefValue(quickTools.$searchInput),
+					replaceValue,
+				);
+				if (query && query.search && query.valid) {
+					cmReplaceAll(editor);
+				}
+			}
+			updateSearchState();
+			return true;
+
+		default:
+			return false;
+	}
 }
 
 function setInput() {
-  const { activeElement } = document;
-  if (!activeElement
-    || activeElement === quickTools.$input
-    || activeElement === document.body
-  ) return;
-  input = activeElement;
+	const terminalInput = getActiveTerminalInput();
+	if (terminalInput) {
+		input = terminalInput;
+		return;
+	}
+
+	const { activeElement } = document;
+	if (
+		!activeElement ||
+		activeElement === quickTools.$input ||
+		activeElement === document.body ||
+		quickTools.$footer.contains(activeElement)
+	) {
+		const { activeFile, editor } = editorManager;
+		if (activeFile?.type === "editor" && editor?.state?.readOnly) {
+			input = editor.contentDOM;
+		}
+		return;
+	}
+	input = activeElement;
+}
+
+function getCodeMirrorInputView(target) {
+	if (!(target instanceof HTMLElement)) return null;
+	const view = EditorView.findFromDOM(target);
+	if (!view?.contentDOM) return null;
+	return target === view.contentDOM || view.contentDOM.contains(target)
+		? view
+		: null;
+}
+
+function handleReadOnlyQuickToolsCaptureEvent(event) {
+	const session = readOnlyCaptureSession;
+	if (!session) return false;
+
+	const view = session.target;
+	if (
+		!view?.state?.readOnly ||
+		!view.contentDOM?.isConnected ||
+		!view.dom?.isConnected
+	) {
+		cancelQuickToolsModifierInput();
+		preventCaptureInput(event);
+		return true;
+	}
+
+	const result = captureReadOnlyQuickToolsKey(session, {
+		type: event.type,
+		key: event.key,
+		data: event.data,
+		value: quickTools.$input.value,
+		inputType: event.inputType,
+		isComposing: event.isComposing,
+	});
+	readOnlyCaptureSession = result.session;
+
+	if (result.outcome.kind === "pass") return false;
+	if (result.outcome.kind === "pending") {
+		if (!event.isComposing) {
+			quickTools.$input.value = "";
+			if (event.type === "beforeinput") preventCaptureInput(event);
+		}
+		return true;
+	}
+
+	quickTools.$input.value = "";
+	preventCaptureInput(event);
+	if (result.outcome.kind === "duplicate") return true;
+
+	const key = result.outcome.key.toUpperCase();
+	const keyCombination = { key, ...session.modifiers };
+	runCodeMirrorQuickToolsTextKey(view, key, keyCombination);
+	return true;
+}
+
+function preventCaptureInput(event) {
+	if (event.cancelable) event.preventDefault();
+}
+
+function getQuickToolsModifierSnapshot() {
+	return {
+		shiftKey: state.shift,
+		altKey: state.alt,
+		ctrlKey: state.ctrl,
+		metaKey: state.meta,
+	};
+}
+
+function clearReadOnlyCaptureSession() {
+	readOnlyCaptureSession = null;
+}
+
+function runCodeMirrorQuickToolKey(keyCode, keyCombination) {
+	const view = getCodeMirrorInputView(input);
+	return view ? runQuickToolKey(view, keyCode, keyCombination) : false;
+}
+
+export function handleCodeMirrorQuickToolsTextInput(view, input) {
+	if (!Object.values(state).includes(true)) return false;
+	if (!view?.state || !view.contentDOM) return false;
+	if (isSelectedRangeDeletion(view, input)) {
+		setQuicktoolsUsed();
+		return true;
+	}
+
+	const { text } = input;
+	if (!text || text.length !== 1) return false;
+
+	const keyCombination = getKeys({ key: text });
+	return runCodeMirrorQuickToolsTextKey(view, text, keyCombination);
+}
+
+function runCodeMirrorQuickToolsTextKey(view, text, keyCombination) {
+	if (!hasQuickToolsModifier(keyCombination)) return false;
+	const canEdit = canQuickToolsEdit(view);
+	resetKeys();
+
+	try {
+		if (
+			keyCombination.shiftKey &&
+			!keyCombination.ctrlKey &&
+			!keyCombination.altKey &&
+			!keyCombination.metaKey
+		) {
+			if (canEdit) {
+				view.dispatch({
+					...view.state.replaceSelection(mapQuickToolShiftText(text)),
+					userEvent: "input.quicktools",
+				});
+			}
+			return true;
+		}
+
+		if (
+			!keyCombination.ctrlKey &&
+			!keyCombination.altKey &&
+			!keyCombination.metaKey
+		) {
+			return false;
+		}
+
+		const command = findQuickToolCommand(
+			getRegisteredCommands(),
+			text,
+			keyCombination,
+		);
+		if (command && executeCommand(command.name, view)) {
+			return true;
+		}
+
+		if (!canEdit) return true;
+		view.contentDOM.dispatchEvent(KeyboardEvent("keydown", keyCombination));
+		return true;
+	} finally {
+		setQuicktoolsUsed();
+		dismissReadOnlyQuickToolsInput(view);
+	}
+}
+
+function hasQuickToolsModifier(modifiers) {
+	return !!(
+		modifiers.shiftKey ||
+		modifiers.ctrlKey ||
+		modifiers.altKey ||
+		modifiers.metaKey
+	);
 }
 
 function toggleSearch() {
-  const $footer = quickTools.$footer;
-  const $searchRow1 = quickTools.$searchRow1;
-  const $searchRow2 = quickTools.$searchRow2;
-  const $searchInput = quickTools.$searchInput.el;
-  const $toggler = quickTools.$toggler;
-  const { editor } = editorManager;
-  const selectedText = editor.getCopyText();
+	const $footer = quickTools.$footer;
+	const $searchRow1 = quickTools.$searchRow1;
+	const $searchRow2 = quickTools.$searchRow2;
+	const $searchInput = quickTools.$searchInput.el;
+	const $toggler = quickTools.$toggler;
+	const { editor } = editorManager;
+	const selectedText = getSelectedText(editor);
 
-  if (!$footer.contains($searchRow1)) {
-    const { className } = quickTools.$toggler;
-    const $content = [...$footer.children];
-    const footerHeight = getFooterHeight();
+	if (!$footer.contains($searchRow1)) {
+		removeSearchBarActions();
+		clearSearchQuickToolsState();
+		const { className } = quickTools.$toggler;
+		const $content = [...$footer.children];
+		const footerHeight = getFooterHeight();
+		activeSearchState = { className, content: $content, footerHeight };
 
-    $toggler.className = 'floating icon clearclose';
-    $footer.content = [$searchRow1, $searchRow2];
-    $searchInput.value = selectedText || '';
+		$toggler.className = "floating icon clearclose";
+		startSearchCloseVisibilitySync();
+		$footer.content = [$searchRow1, $searchRow2];
+		clearSearchQuickToolsState($content);
+		setRefValue($searchInput, selectedText || "");
 
-    $searchInput.oninput = function (e) {
-      if (this.value) find(0, false);
-    };
+		$searchInput.oninput = function () {
+			find(0, false);
+		};
 
-    $searchInput.onsearch = function () {
-      if (this.value) find(1, false);
-    };
+		$searchInput.onsearch = function () {
+			if (this.value) {
+				searchHistory.addToHistory(this.value);
+				find(1, false);
+			} else {
+				find(0, false);
+			}
+		};
 
-    setFooterHeight(2);
-    find(0, false);
+		// Setup history navigation for search inputs
+		setupHistoryNavigation();
 
-    actionStack.push({
-      id: 'search-bar',
-      action: () => {
-        removeSearch();
-        $footer.content = $content;
-        $toggler.className = className;
-        setFooterHeight(footerHeight);
-      },
-    });
-  } else {
-    const inputValue = $searchInput?.value || '';
-    if (inputValue !== selectedText) {
-      $searchInput.value = selectedText;
-      find(0, false);
-      return;
-    }
+		setFooterHeight(2);
+		find(0, false);
 
-    actionStack.get('search-bar').action();
-  }
+		actionStack.push({
+			id: "search-bar",
+			action: () => {
+				const restoreState = activeSearchState || {
+					className,
+					content: $content,
+					footerHeight,
+				};
+				stopSearchCloseVisibilitySync();
+				clearSearchQuickToolsState(restoreState.content);
+				removeSearch();
+				clearQuickToolsButtonFeedback(restoreState.content);
+				$footer.content = restoreState.content;
+				$toggler.className = restoreState.className;
+				setFooterHeight(restoreState.footerHeight);
+				clearSearchQuickToolsState(restoreState.content);
+				activeSearchState = null;
+			},
+		});
+	} else {
+		const inputValue = getRefValue($searchInput);
+		if (inputValue !== selectedText) {
+			setRefValue($searchInput, selectedText || "");
+			find(0, false);
+			return;
+		}
 
-  $searchInput.focus();
-  editor.resize(true);
+		actionStack.get("search-bar")?.action?.();
+	}
+
+	$searchInput.focus();
+}
+
+function startSearchCloseVisibilitySync() {
+	stopSearchCloseVisibilitySync();
+	syncSearchCloseVisibility();
+
+	const { $toggler } = quickTools;
+	searchCloseVisibilityObserver = new MutationObserver(
+		syncSearchCloseVisibility,
+	);
+	searchCloseVisibilityObserver.observe(root, { childList: true });
+	searchCloseVisibilityObserver.observe($toggler, {
+		attributes: true,
+		attributeFilter: ["class"],
+	});
+}
+
+function stopSearchCloseVisibilitySync() {
+	searchCloseVisibilityObserver?.disconnect();
+	searchCloseVisibilityObserver = null;
+	quickTools.$searchRow1.classList.remove("inline-close");
+}
+
+function syncSearchCloseVisibility() {
+	const { $searchRow1, $toggler } = quickTools;
+	const hasVisibleFloatingClose =
+		appSettings.value.floatingButton &&
+		$toggler.isConnected &&
+		!$toggler.classList.contains("hide");
+	$searchRow1.classList.toggle("inline-close", !hasVisibleFloatingClose);
 }
 
 function toggle() {
-  // if search is active, remove it
-  const searchBar = actionStack.get('search-bar');
-  if (searchBar?.action) {
-    searchBar.action();
-    return;
-  }
+	// if search is active, remove it
+	const searchBar = actionStack.get("search-bar");
+	if (searchBar?.action) {
+		searchBar.action();
+		return;
+	}
 
-  const $footer = quickTools.$footer;
-  const $row1 = quickTools.$row1;
-  const $row2 = quickTools.$row2;
+	const $footer = quickTools.$footer;
+	const $row1 = quickTools.$row1;
+	const $row2 = quickTools.$row2;
 
-  if (!$footer.contains($row1)) {
-    setHeight();
-  } else if (!$footer.contains($row2)) {
-    setHeight(2);
-  } else {
-    setHeight(0);
-  }
-  focusEditor();
+	if (!$footer.contains($row1)) {
+		setHeight();
+	} else if (!$footer.contains($row2)) {
+		setHeight(2);
+	} else {
+		setHeight(0);
+	}
+	focusEditor();
 }
 
-function setHeight(height = 1) {
-  const { $footer, $row1, $row2 } = quickTools;
-  const { editor } = editorManager;
+function setHeight(height = 1, save = true) {
+	const { $footer, $row1, $row2 } = quickTools;
+	const { editor, activeFile } = editorManager;
 
-  setFooterHeight(height);
-  appSettings.update({ quickTools: height }, false);
-  editor.resize(true);
+	// If active file has hideQuickTools, force height to 0 and don't save
+	if (activeFile?.hideQuickTools) {
+		height = 0;
+		save = false;
+	}
 
-  if (!height) {
-    $row1.remove();
-    $row2.remove();
-    return;
-  }
+	const searchBar = actionStack.get("search-bar");
+	if (searchBar?.action) {
+		if (height === 0) {
+			searchBar.action();
+		} else {
+			clearSearchQuickToolsState(activeSearchState?.content);
+			const footerHeight = Number(height) || 0;
+			activeSearchState = {
+				className:
+					activeSearchState?.className || quickTools.$toggler.className,
+				content: getQuickToolsRows(footerHeight),
+				footerHeight,
+			};
+			clearQuickToolsButtonFeedback(activeSearchState.content);
+			if (save) {
+				appSettings.update({ quickTools: height }, false);
+			}
+			return;
+		}
+	}
 
-  if (height >= 1) {
-    $row1.style.scrollBehavior = 'unset';
-    $footer.append($row1);
-    $row1.scrollLeft = parseInt(localStorage.quickToolRow1ScrollLeft, 10);
-    --height;
-  }
+	setFooterHeight(height);
+	if (save) {
+		appSettings.update({ quickTools: height }, false);
+	}
 
-  if (height >= 1) {
-    $row2.style.scrollBehavior = 'unset';
-    $footer.append($row2);
-    $row2.scrollLeft = parseInt(localStorage.quickToolRow2ScrollLeft, 10);
-    --height;
-  }
+	if (height >= 1) {
+		$row1.style.scrollBehavior = "unset";
+		$footer.append($row1);
+		$row1.scrollLeft = Number.parseInt(
+			localStorage.quickToolRow1ScrollLeft,
+			10,
+		);
+		--height;
+	} else {
+		$row1.remove();
+	}
+
+	if (height >= 1) {
+		$row2.style.scrollBehavior = "unset";
+		$footer.append($row2);
+		$row2.scrollLeft = Number.parseInt(
+			localStorage.quickToolRow2ScrollLeft,
+			10,
+		);
+		--height;
+	} else {
+		$row2.remove();
+	}
+}
+
+function getQuickToolsRows(height) {
+	const { $row1, $row2 } = quickTools;
+	return [$row1, $row2].slice(0, height);
 }
 
 /**
  * Removes search bar from footer
  */
 function removeSearch() {
-  const { $footer, $searchRow1, $searchRow2 } = quickTools;
+	const { $footer, $searchRow1, $searchRow2 } = quickTools;
+	const hasSearchRows = $footer.contains($searchRow1);
 
-  if (!$footer.contains($searchRow1)) return;
-  actionStack.remove('search-bar');
-  $footer.removeAttribute('data-searching');
-  $searchRow1.remove();
-  $searchRow2.remove();
-  focusEditor();
+	removeSearchBarActions();
+	if (!hasSearchRows) return;
+	clearSearchQuickToolsState();
+	$footer.removeAttribute("data-searching");
+	$searchRow1.remove();
+	$searchRow2.remove();
+
+	// Reset history navigation when search is closed
+	searchHistory.resetAllNavigation();
+
+	const { activeFile, editor } = editorManager;
+
+	// Check if current tab is a terminal
+	if (
+		activeFile &&
+		activeFile.type === "terminal" &&
+		activeFile.terminalComponent
+	) {
+		activeFile.terminalComponent.searchAddon?.clearDecorations();
+		activeFile.terminalComponent.searchAddon?.clearActiveDecoration();
+		return;
+	}
+	clearSearchQuery(editor);
+	focusEditor();
 }
 
 /**
@@ -314,44 +836,79 @@ function removeSearch() {
  * @param {boolean} backward Whether to search backward
  */
 function find(skip, backward) {
-  const { $searchInput } = quickTools;
-  editorManager.editor.find($searchInput.value, {
-    skipCurrent: skip,
-    ...appSettings.value.search,
-    backwards: backward,
-  });
+	const { $searchInput } = quickTools;
+	const { activeFile } = editorManager;
 
-  updateSearchState();
+	// Check if current tab is a terminal
+	if (
+		activeFile &&
+		activeFile.type === "terminal" &&
+		activeFile.terminalComponent
+	) {
+		activeFile.terminalComponent.search($searchInput.value, skip, backward);
+	} else {
+		const editor = editorManager.editor;
+		const searchValue = getRefValue($searchInput);
+		const query = applySearchQuery(editor, searchValue);
+		if (!query || !query.search || !query.valid) {
+			updateSearchState();
+			return;
+		}
+
+		const normalizedSkip = Number(skip) || 0;
+		if (normalizedSkip === 0 && selectionMatchesQuery(editor, query)) {
+			updateSearchState();
+			return;
+		}
+		const steps = Math.max(1, normalizedSkip);
+		const runCommand = backward ? cmFindPrevious : cmFindNext;
+		for (let i = 0; i < steps; ++i) {
+			if (!runCommand(editor)) break;
+		}
+	}
+
+	updateSearchState();
 }
 
 function updateSearchState() {
-  const MAX_COUNT = 999;
-  const { editor } = editorManager;
-  const { $searchPos, $searchTotal } = quickTools;
+	const MAX_COUNT = 999;
+	const { activeFile, editor } = editorManager;
+	const { $searchPos, $searchTotal } = quickTools;
 
-  let regex = editor.$search.$options.re;
-  let all = 0;
-  let before = 0;
-  if (regex) {
-    const value = editor.getValue();
-    const offset = editor.session.doc.positionToIndex(
-      editor.selection.anchor,
-    );
-    let last = (regex.lastIndex = 0);
-    let m;
-    while ((m = regex.exec(value))) {
-      all++;
-      last = m.index;
-      if (last <= offset) before++;
-      if (all > MAX_COUNT) break;
-      if (!m[0]) {
-        regex.lastIndex = last += 1;
-        if (last >= value.length) break;
-      }
-    }
-  }
-  $searchTotal.textContent = all > MAX_COUNT ? '999+' : all;
-  $searchPos.textContent = before;
+	// Check if current tab is a terminal
+	if (activeFile && activeFile.type === "terminal") {
+		// For terminal, we can't easily count all matches like in ACE editor
+		// xterm search addon doesn't provide this information
+		// So we just show a generic indicator
+		$searchTotal.textContent = "?";
+		$searchPos.textContent = "?";
+		return;
+	}
+	const query = editor ? getSearchQuery(editor.state) : null;
+	if (!query || !query.search || !query.valid) {
+		$searchTotal.textContent = "0";
+		$searchPos.textContent = "0";
+		return;
+	}
+
+	const cursor = query.getCursor(editor.state.doc);
+	let total = 0;
+	let before = 0;
+	let limited = false;
+	const cursorPos = editor.state.selection.main.head;
+	for (cursor.next(); !cursor.done; cursor.next()) {
+		total++;
+		if (cursorPos >= cursor.value.from) {
+			before = Math.min(total, MAX_COUNT);
+		}
+		if (total === MAX_COUNT) {
+			cursor.next();
+			limited = !cursor.done;
+			break;
+		}
+	}
+	$searchTotal.textContent = limited ? "999+" : String(total);
+	$searchPos.textContent = String(before);
 }
 
 /**
@@ -360,42 +917,65 @@ function updateSearchState() {
  * @returns {void}
  */
 function setFooterHeight(height) {
-  const { $toggler, $footer, $searchRow1 } = quickTools;
-  if (height) root.setAttribute('footer-height', height);
-  else root.removeAttribute('footer-height');
+	const { $toggler, $footer, $searchRow1 } = quickTools;
+	if (height) root.setAttribute("footer-height", height);
+	else root.removeAttribute("footer-height");
 
-  if ($toggler.classList.contains('clearclose')) return;
+	if ($toggler.classList.contains("clearclose")) return;
 
-  if (height > 1 && !$footer.contains($searchRow1)) {
-    $toggler.classList.remove('keyboard_arrow_up');
-    $toggler.classList.add('keyboard_arrow_down');
-  } else {
-    $toggler.classList.remove('keyboard_arrow_down');
-    $toggler.classList.add('keyboard_arrow_up');
-  }
+	if (height > 1 && !$footer.contains($searchRow1)) {
+		$toggler.classList.remove("keyboard_arrow_up");
+		$toggler.classList.add("keyboard_arrow_down");
+	} else {
+		$toggler.classList.remove("keyboard_arrow_down");
+		$toggler.classList.add("keyboard_arrow_up");
+	}
 }
 
 function getFooterHeight() {
-  return parseInt(root.getAttribute('footer-height')) || 0;
+	return Number.parseInt(root.getAttribute("footer-height")) || 0;
 }
 
 function focusEditor() {
-  const { editor, activeFile } = editorManager;
-  if (activeFile.focused) {
-    editor.focus();
-  }
+	const { editor, activeFile } = editorManager;
+	if (!activeFile?.focused) {
+		return;
+	}
+
+	if (activeFile.type === "terminal" && activeFile.terminalComponent) {
+		activeFile.terminalComponent.focus();
+		return;
+	}
+
+	if (editor) {
+		focusEditorIfEditable(editor);
+	}
 }
 
 function resetKeys() {
-  state.shift = false;
-  events.shift.forEach((cb) => cb(false));
-  state.alt = false;
-  events.alt.forEach((cb) => cb(false));
-  state.ctrl = false;
-  events.ctrl.forEach((cb) => cb(false));
-  state.meta = false;
-  events.meta.forEach((cb) => cb(false));
-  input.focus();
+	clearQuickToolsModifierState({ restoreFocus: true });
+}
+
+function clearSearchQuickToolsState(extraContainers = []) {
+	clearQuickToolsModifierState();
+	clearQuickToolsButtonFeedback(
+		getQuickToolsFeedbackContainers(extraContainers),
+	);
+}
+
+function getQuickToolsFeedbackContainers(extraContainers = []) {
+	const { $footer, $row1, $row2 } = quickTools;
+	return [
+		$footer,
+		$row1,
+		$row2,
+		...(activeSearchState?.content || []),
+		...(Array.isArray(extraContainers) ? extraContainers : [extraContainers]),
+	];
+}
+
+function removeSearchBarActions() {
+	return removeActionStackEntries(actionStack, "search-bar");
 }
 
 /**
@@ -406,37 +986,178 @@ function resetKeys() {
  * @returns {KeyboardEventInit}
  */
 export function getKeys(key = {}) {
-  return {
-    ...key,
-    shiftKey: state.shift,
-    altKey: state.alt,
-    ctrlKey: state.ctrl,
-    metaKey: state.meta,
-  };
+	return {
+		...key,
+		shiftKey: state.shift,
+		altKey: state.alt,
+		ctrlKey: state.ctrl,
+		metaKey: state.meta,
+	};
+}
+
+function getActiveTerminalComponent() {
+	const { activeFile } = editorManager;
+	if (activeFile?.type !== "terminal") return null;
+	return activeFile.terminalComponent || null;
+}
+
+function getActiveTerminalInput() {
+	return getActiveTerminalComponent()?.terminal?.textarea || null;
+}
+
+function insertText(value) {
+	const text = String(value ?? "");
+	if (!text) return false;
+
+	const terminalComponent = getActiveTerminalComponent();
+	if (terminalComponent?.terminal) {
+		if (typeof terminalComponent.terminal.paste === "function") {
+			terminalComponent.terminal.paste(text);
+			terminalComponent.focus();
+			return true;
+		}
+
+		if (terminalComponent.serverMode && terminalComponent.isConnected) {
+			terminalComponent.write(text);
+			terminalComponent.focus();
+			return true;
+		}
+
+		return false;
+	}
+
+	const { editor } = editorManager;
+	if (blockReadOnlyQuickToolsEdit(editor)) return false;
+	return editor ? editor.insert(text) : false;
+}
+
+function blockReadOnlyQuickToolsEdit(view) {
+	if (!view?.state?.readOnly) return false;
+	cancelQuickToolsModifierInput();
+	return true;
+}
+
+function isReadOnlyCodeMirrorInput(target) {
+	return !!getCodeMirrorInputView(target)?.state.readOnly;
+}
+
+function dismissReadOnlyQuickToolsInput(view) {
+	if (!view?.state?.readOnly) return false;
+	return finishQuickToolsModifierInput(view, quickTools.$input);
+}
+
+function restoreQuickToolsTargetFocus() {
+	const codeMirrorView = getCodeMirrorInputView(input);
+	if (codeMirrorView) {
+		if (dismissReadOnlyQuickToolsInput(codeMirrorView)) return;
+		focusEditorIfEditable(codeMirrorView);
+		return;
+	}
+	if (input) {
+		input.focus?.();
+	} else {
+		quickTools.$input.blur();
+	}
 }
 
 function shiftKeyMapping(char) {
-  switch (char) {
-    case '1': return '!';
-    case '2': return '@';
-    case '3': return '#';
-    case '4': return '$';
-    case '5': return '%';
-    case '6': return '^';
-    case '7': return '&';
-    case '8': return '*';
-    case '9': return '(';
-    case '0': return ')';
-    case '-': return '_';
-    case '=': return '+';
-    case '[': return '{';
-    case ']': return '}';
-    case '\\': return '|';
-    case ';': return ':';
-    case '\'': return '"';
-    case ',': return '<';
-    case '.': return '>';
-    case '/': return '?';
-    default: return char.toUpperCase();
-  }
+	return mapQuickToolShiftText(char);
+}
+
+function getRefValue(ref) {
+	if (!ref) return "";
+	const direct = ref.value;
+	if (typeof direct === "string") return direct;
+	if (typeof direct === "number") return String(direct);
+	if (ref.el) {
+		const elValue = ref.el.value;
+		if (typeof elValue === "string") return elValue;
+		if (typeof elValue === "number") return String(elValue);
+	}
+	return "";
+}
+
+function setRefValue(ref, value) {
+	if (!ref) return;
+	const normalized = typeof value === "string" ? value : String(value ?? "");
+	if (ref.el) ref.el.value = normalized;
+	ref.value = normalized;
+}
+
+function applySearchQuery(editor, searchValue, replaceValue) {
+	if (!editor) return null;
+	const options = appSettings?.value?.search ?? {};
+	const queryConfig = {
+		search: String(searchValue ?? ""),
+		caseSensitive: !!options.caseSensitive,
+		regexp: !!options.regExp,
+		wholeWord: !!options.wholeWord,
+	};
+	if (replaceValue !== undefined) {
+		queryConfig.replace = String(replaceValue ?? "");
+	}
+	const query = new SearchQuery(queryConfig);
+	editor.dispatch({ effects: setSearchQuery.of(query) });
+	return query;
+}
+
+function clearSearchQuery(editor) {
+	if (!editor) return;
+	editor.dispatch({
+		effects: setSearchQuery.of(new SearchQuery({ search: "" })),
+	});
+}
+
+function getSelectedText(editor) {
+	if (!editor) return "";
+	if (typeof editor.getSelectedText === "function") {
+		try {
+			return editor.getSelectedText() ?? "";
+		} catch (_) {
+			// fall back to CodeMirror state
+		}
+	}
+	try {
+		const { state } = editor;
+		if (!state) return "";
+		const { from, to } = state.selection.main ?? {};
+		if (typeof from !== "number" || typeof to !== "number") return "";
+		if (from === to) return "";
+		return state.sliceDoc(from, to);
+	} catch (_) {
+		return "";
+	}
+}
+
+function selectionMatchesQuery(editor, query) {
+	try {
+		if (!editor || !query || !query.valid || !query.search) return false;
+		const range = editor.state?.selection?.main;
+		if (!range || range.from === range.to) return false;
+		const cursor = query.getCursor(editor.state.doc, range.from, range.to);
+		cursor.next();
+		return (
+			!cursor.done &&
+			cursor.value.from === range.from &&
+			cursor.value.to === range.to
+		);
+	} catch (_) {
+		return false;
+	}
+}
+
+/**
+ * Gets text input
+ * @returns {HTMLElement}
+ */
+function getInput() {
+	return input || editorManager.editor.contentDOM;
+}
+
+function setQuicktoolsUsed() {
+	clearTimeout(quickToolUsedTimeout);
+	quickToolUsed = true;
+	quickToolUsedTimeout = setTimeout(() => {
+		quickToolUsed = false;
+	}, 500);
 }
